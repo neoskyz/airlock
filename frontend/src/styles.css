@@ -3595,3 +3595,6 @@ i {
     align-self: flex-end;
   }
 }
+
+.task-status-notice { display: flex; align-items: flex-start; flex-direction: column; gap: 10px; }
+.task-status-notice strong { font-weight: 600; }

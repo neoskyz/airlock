@@ -51,7 +51,7 @@ def test_live_failure_is_reported_without_compromised_replay():
         assert run.agent_mode == "live"
         agent.payment.assert_not_awaited()
         assert "No automatic retry" in run.error
-        assert not run.events
+        assert not any(event["type"] != "run_status" for event in run.events)
     asyncio.run(scenario())
 
 
@@ -188,7 +188,7 @@ def test_openai_failure_counts_budget_without_scripted_replay():
         assert budget.snapshot()["llm_calls_used"] == 1
         create.assert_awaited_once()
         agent.payment.assert_not_awaited()
-        assert not run.events
+        assert not any(event["type"] != "run_status" for event in run.events)
     asyncio.run(scenario())
 
 

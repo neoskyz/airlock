@@ -62,6 +62,12 @@ export interface TimelineEvent extends Explainable {
   status?: string;
   mock?: boolean;
 }
+export interface ClientApproval {
+  id: string;
+  status: string;
+  run_id?: string;
+  console_url?: string;
+}
 export interface Approval extends Explainable {
   user_request?: string;
   id: string;
@@ -76,7 +82,9 @@ export interface Approval extends Explainable {
 }
 export interface Run {
   id: string;
-  status: 'running' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled';
+  revision?: number;
+  blocking?: boolean;
+  status: 'running' | 'awaiting_approval' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
   firewall_enabled?: boolean;
   agent_mode?: AgentMode;
   agent_provider?: AgentProvider | 'scripted';
@@ -84,7 +92,7 @@ export interface Run {
   judge_model?: string;
   messages: { role: string; content: string }[];
   events: TimelineEvent[];
-  approvals: Approval[];
+  approvals: (Approval | ClientApproval)[];
   error?: string;
   judge_mode?: string;
   llm_degraded?: boolean;

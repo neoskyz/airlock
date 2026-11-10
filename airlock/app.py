@@ -175,10 +175,33 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
             return {"balance":f"{balance:.2f}", "currency":"USD", "label":"PayPal sandbox balance", "source":"paypal", "starting_balance":f"{wallet_baseline['balance']:.2f}", "paypal_mode":paypal.mode}
         return {"balance":f"{settings.sandbox_starting_balance-spent:.2f}", "currency":"USD", "label":"Sandbox · local balance", "source":"local_ledger", "starting_balance":f"{settings.sandbox_starting_balance:.2f}", "paypal_mode":paypal.mode}
 
+    def blocking_run():
+        # Cancelled tasks can still be unwinding a provider operation. Do not
+        # overlap the next run with their cleanup or clear its audit ledger.
+        return next((run for run in runs.values()
+                     if run.status in {"running", "awaiting_approval", "cancelling"}
+                     or (run.id in run_tasks and not run_tasks[run.id].done())), None)
+
+    def run_conflict(run):
+        pending = next((card for card in run.client_snapshot()["approvals"] if card["status"] == "pending"), None)
+        if run.status == "awaiting_approval":
+            message = "A previous task is waiting for approval in the Airlock console. Review its approval or stop the task."
+        elif run.status == "cancelling":
+            message = "A previous task is stopping. Wait for its payment cleanup before starting another task."
+        else:
+            message = "A previous task is still running, including any final agent summary. Wait for it or stop the task."
+        detail = {"message":f"Task {run.id[:8]} ({run.status.replace('_', ' ')}): {message}", "run_id":run.id, "status":run.status, "run":run.client_snapshot()}
+        if pending:
+            detail["approval_url"] = pending["console_url"]
+        return HTTPException(409, detail)
+
     @app.post("/api/sandbox/reset")
     async def reset_sandbox_data(body: ResetSandboxData):
-        if any(run.status in {"running", "awaiting_approval"} for run in runs.values()) or any(not task.done() for task in tasks) or approvals.pending:
-            raise HTTPException(409, "Finish or stop the current run before resetting sandbox data")
+        active_run = blocking_run()
+        if active_run:
+            raise run_conflict(active_run)
+        if approvals.pending:
+            raise HTTPException(409, "Pending payment cleanup must finish before resetting sandbox data")
         # No await in the check/reset section: a new run cannot interleave.
         audit.reset_sandbox_data()
         runs.clear()
@@ -230,14 +253,15 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
 
     @app.post("/api/runs",status_code=202)
     async def start(body: StartRun, request: Request):
+        if not body.message.strip():
+            raise HTTPException(422,"Message cannot be blank")
+        active_run = blocking_run()
+        if active_run:
+            raise run_conflict(active_run)
         ip = client_ip(request)
         retry_after = None if ip in settings.rate_limit_exempt_ips else rate_limiter.check(ip)
         if retry_after is not None:
             raise HTTPException(429, f"Too many demo runs from your IP. Please try again in {retry_after} seconds.", headers={"Retry-After": str(retry_after)})
-        if not body.message.strip():
-            raise HTTPException(422,"Message cannot be blank")
-        if any(run.status in {"running","awaiting_approval"} for run in runs.values()):
-            raise HTTPException(409,"Finish the current demo run before starting another")
         requested = body.agent_mode or ("compromised" if settings.demo_mode else settings.agent_mode)
         if body.firewall_enabled is not None:
             # Legacy API compatibility: a requested mode changes the shared console state.
@@ -254,11 +278,21 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
         def finished(done):
             tasks.discard(done)
             run_tasks.pop(run.id, None)
+            # Last-resort lifecycle repair also covers cancellation before the
+            # agent coroutine ever starts and unexpected adapter failures.
+            if run.status == "cancelling":
+                run.set_status("cancelled")
+            elif run.status in {"running", "awaiting_approval"}:
+                run.error = "Agent execution stopped unexpectedly. Check PayPal before retrying."
+                approvals.cancel_run(run)
+                run.set_status("failed")
+            if not done.cancelled():
+                done.exception()  # Retrieve failures without leaking task warnings.
         task.add_done_callback(finished)
-        return {"id":run.id}
+        return {"id":run.id, "run":run.client_snapshot()}
 
     @app.get("/api/runs/{identifier}")
-    async def get_run(identifier: str):
+    async def get_run(identifier: str, audience: Literal["client", "console"] = "console"):
         if identifier not in runs:
             raise HTTPException(404,"Run not found")
         run = runs[identifier]
@@ -266,25 +300,34 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
         modes = runtime_modes()
         if run.status in {"running", "awaiting_approval"}:
             run.judge_mode, run.llm_degraded, run.judge_model = modes["judge_mode"], modes["llm_degraded"], modes["judge_model"]
-        return run.snapshot()
+        return run.client_snapshot() if audience == "client" else run.snapshot()
 
     @app.post("/api/runs/{identifier}/cancel")
-    async def cancel_run(identifier: str):
+    async def cancel_run(identifier: str, audience: Literal["client", "console"] = "console"):
         run = runs.get(identifier)
         if run is None:
             raise HTTPException(404,"Run not found")
-        if run.status in {"running", "awaiting_approval"}:
+        was_active = run.status in {"running", "awaiting_approval"}
+        task = run_tasks.get(identifier)
+        if was_active or (task is not None and not task.done()):
             # No await before cancellation: approval resolution cannot interleave here.
-            run.status = "cancelled"
+            run.set_status("cancelling")
             approvals.cancel_run(run)
-            task = run_tasks.get(identifier)
-            if task is not None:
-                task.cancel()
+            if task is not None and not task.done():
+                if was_active:
+                    task.cancel()
+                # A misbehaving adapter may suppress cancellation; keep the
+                # workspace responsive and block new runs until it settles.
+                await asyncio.wait({task}, timeout=.25)
+            if task is None or task.done():
+                run.set_status("cancelled")
             # A failed cancellation audit must not leave the agent running.
-            audit.record_run_cancellation(run.id, run.firewall_enabled, paypal.mock)
-            await run.say("Run cancelled. Submitted PayPal calls are not rolled back; check the sandbox before retrying a payment.")
-            await run.emit({"type":"cancelled", "status":"cancelled", "message":"Run cancelled by user."})
-        return run.snapshot()
+            if was_active:
+                audit.record_run_cancellation(run.id, run.firewall_enabled, paypal.mock)
+                await run.say("Run cancelled. Submitted PayPal calls are not rolled back; check the sandbox before retrying a payment.")
+                if run.status == "cancelled":
+                    await run.emit({"type":"cancelled", "status":"cancelled", "message":"Run cancelled by user."})
+        return run.client_snapshot() if audience == "client" else run.snapshot()
 
     @app.post("/api/approvals/{identifier}")
     async def resolve_approval(identifier: str,body: ApprovalChoice):

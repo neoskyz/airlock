@@ -1,5 +1,5 @@
 export class ApiError extends Error {
-  constructor(message: string, public readonly status: number) {
+  constructor(message: string, public readonly status: number, public readonly detail?: unknown) {
     super(message);
     this.name = 'ApiError';
   }
@@ -23,12 +23,15 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
       signal: controller.signal,
     });
     if (!response.ok) {
-      let detail = `${response.status} ${response.statusText}`;
+      let message = `${response.status} ${response.statusText}`;
+      let detail: unknown;
       try {
         const body = await response.json();
-        if (typeof body.detail === 'string') detail = body.detail;
+        detail = body.detail;
+        if (typeof detail === 'string') message = detail;
+        else if (detail && typeof detail === 'object' && 'message' in detail && typeof detail.message === 'string') message = detail.message;
       } catch { /* Non-JSON server errors retain their status text. */ }
-      throw new ApiError(detail, response.status);
+      throw new ApiError(message, response.status, detail);
     }
     return await response.json() as T;
   } catch (error) {

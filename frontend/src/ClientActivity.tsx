@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { displayText, isRunActive } from './runUpdates';
+import { displayText, isRunBlocking } from './runUpdates';
 import type { Product, Run, TimelineEvent } from './types';
 import { eventMoney as money } from './consoleNavigation';
 import './clientActivity.css';
@@ -216,11 +216,11 @@ export function ClientActivity({
   run: Run;
 }) {
   const steps = activitySteps(run.events || []);
-  const active = isRunActive(run.status);
+  const active = isRunBlocking(run);
   const end = useRef<HTMLDivElement>(null);
   const last = steps.at(-1);
-  let current = 'Planning the next step';
-  if (run.status === 'awaiting_approval') current = 'Waiting for payment approval';else if (last?.kind === 'search') current = last.products !== undefined ? `Comparing ${last.products.length} catalog results` : 'Searching the product catalog';else if (last?.kind === 'page' && last.product) current = `Reading product page · ${productName(last.product)}`;else if (last?.kind === 'payment' && !last.result) current = last.product ? `Checking out · ${productName(last.product)}` : `Submitting ${last.event.tool || 'payment request'}`;
+  let current = last?.kind === 'payment' && last.result ? 'Finishing the task · waiting for the agent’s response' : 'Planning the next step';
+  if (run.blocking) current = 'Finishing the task on the server';else if (run.status === 'cancelling') current = 'Stopping the task';else if (run.status === 'awaiting_approval') current = 'Waiting for payment approval';else if (last?.kind === 'search') current = last.products !== undefined ? `Comparing ${last.products.length} catalog results` : 'Searching the product catalog';else if (last?.kind === 'page' && last.product) current = `Reading product page · ${productName(last.product)}`;else if (last?.kind === 'payment' && !last.result) current = last.product ? `Checking out · ${productName(last.product)}` : `Submitting ${last.event.tool || 'payment request'}`;
   useEffect(() => {
     end.current?.scrollIntoView({
       behavior: 'smooth',
@@ -290,8 +290,8 @@ export function ClientActivity({
       </li>;
       })}
     </ol>
-    {run.status === 'completed' && <div className="task-finished">✓ Task finished<span>Orders and payouts retain their PayPal status; acceptance does not confirm settlement.</span></div>}
-    {run.status === 'cancelled' && <div className="task-finished">Task stopped. Submitted requests are not rolled back.</div>}
+    {run.status === 'completed' && !run.blocking && <div className="task-finished">✓ Task finished<span>Orders and payouts retain their PayPal status; acceptance does not confirm settlement.</span></div>}
+    {run.status === 'cancelled' && !run.blocking && <div className="task-finished">Task stopped. Submitted requests are not rolled back.</div>}
     {run.error && <div className="error-banner" role="alert">The agent could not complete this task. Check the payment status before retrying.</div>}
     <div ref={end} />
   </div>;

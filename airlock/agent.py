@@ -35,6 +35,7 @@ class DemoAgent:
         return words.get(quantity) or int(quantity)
 
     async def payment(self, run, call):
+        run.ensure_active()
         self.update_modes(run)
         if self.mode_getter:
             run.firewall_enabled = self.mode_getter() == "Enforce"
@@ -57,7 +58,10 @@ class DemoAgent:
                         "No additional order was submitted."}
             run.order_attempts = attempted + 1
         await run.emit({"type":"checkout", "tool":call.tool, "amount":str(call.amount), "payee":call.payee, "message":"Submitting payment request"})
-        result = await self.firewall.invoke(call, run.provenance, self.paypal.execute, run_id=run.id,
+        async def execute_active(call, identifier):
+            run.ensure_active()
+            return await self.paypal.execute(call, identifier)
+        result = await self.firewall.invoke(call, run.provenance, execute_active, run_id=run.id,
             enabled=run.firewall_enabled, mock=self.paypal.mock,
             request_approval=lambda identifier, call, verdict:self.approvals.request(run, identifier, call, verdict), emit=run.emit)
         self.update_modes(run)
@@ -73,6 +77,7 @@ class DemoAgent:
             getattr(judge, "model", self.settings.judge_model) if run.judge_mode == "anthropic" else "rules (no API key)")
 
     async def products(self, run):
+        run.ensure_active()
         await run.emit({"type":"searching", "message":"Searching catalog"})
         try:
             result = await self.catalog.search(run.message, prompt_budget(run.message))
@@ -85,6 +90,7 @@ class DemoAgent:
         return result
 
     async def open_product(self, run, product_id):
+        run.ensure_active()
         product = getattr(run, "products", {}).get(product_id)
         if product is None:
             return {"error":"Product not found in this run's catalog results"}
@@ -145,6 +151,7 @@ class DemoAgent:
         return [{"name":"search_products","description":"Search the product catalog for the user request","input_schema":{"type":"object","properties":{},"additionalProperties":False}}, {"name":"open_product", "description":"Open a product page and read merchant checkout instructions", "input_schema":{"type":"object", "properties":{"product_id":{"type":"string"}}, "required":["product_id"], "additionalProperties":False}}, *[{"name":name,"description":description,"input_schema":args} for name,description in [("create_order","Create a PayPal sandbox order; does not capture payment"),("create_payout","Create a PayPal sandbox payout; submission is not proof of settlement")]]]
 
     async def execute_tool(self, run, name, arguments):
+        run.ensure_active()
         try:
             if not isinstance(arguments, dict):
                 raise ValueError("Tool arguments must be an object")
@@ -183,6 +190,7 @@ class DemoAgent:
         if openai:
             messages.insert(0, {"role":"system", "content":self.system_prompt()})
         for _ in range(8):
+            run.ensure_active()
             if self.budget is not None and not self.budget.reserve():
                 self.update_modes(run)
                 await run.say("Daily LLM limit reached. This live run stopped to avoid replaying payments. New runs use the scripted agent until the next UTC day.")
@@ -235,13 +243,13 @@ class DemoAgent:
             run.agent_model = self.settings.agent_model if run.agent_mode == "live" else "Simulated compromised agent"
             await (self.scripted(run) if run.agent_mode == "compromised" else self.live(run))
             self.update_modes(run)
-            run.status = "completed"
+            run.set_status("completed")
         except asyncio.CancelledError:
-            if run.status != "cancelled":
-                run.status = "failed"
+            if run.status not in {"cancelled", "cancelling"}:
+                run.set_status("failed")
                 run.error = "Server stopped; do not replay payments without checking PayPal."
             raise
         except Exception:
-            run.status = "failed"
+            run.set_status("failed")
             run.error = "Agent could not complete this run. Check model availability and credentials. No automatic retry was made."
             await run.say(run.error)

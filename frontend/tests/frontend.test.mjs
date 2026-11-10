@@ -26,7 +26,7 @@ async function load(entry, react) {
   compiled.filename = filename;
   compiled.paths = Module._nodeModulePaths(root);
   const require = compiled.require.bind(compiled);
-  compiled.require = name => name === 'react' && react ? react : require(name);
+  compiled.require = name => name === 'react' && react ? { ...React, ...react } : require(name);
   compiled._compile(result.outputFiles[0].text, compiled.filename);
   return compiled.exports;
 }
@@ -42,7 +42,7 @@ function hooks(overrides = []) {
     reset() { stateCursor = 0; refCursor = 0; },
     useState(initial) {
       const index = stateCursor++;
-      if (!(index in states)) states[index] = index in overrides ? overrides[index] : initial;
+      if (!(index in states)) states[index] = index in overrides ? overrides[index] : typeof initial === 'function' ? initial() : initial;
       return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }];
     },
     useRef(initial) {
@@ -192,5 +192,384 @@ test('audit chunk failure has a reload action for the latest deployment', async 
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
+  }
+});
+
+
+const sampleRun = (id, status = 'running', revision = 1) => ({
+  id, status, revision, messages: [{ role: 'user', content: 'Buy headphones' }], events: [], approvals: [],
+});
+const liveState = runs => ({ config: { paypal_mode: 'MOCK' }, runs, audit: { rows: [] }, wallet: { balance: '1000' } });
+const renderClient = (Client, react) => { react.reset(); return Client(); };
+const stopButton = tree => find(tree, node => node.type === 'button' && node.props.className === 'button stop');
+const submitClient = tree => find(tree, node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+const activityRun = tree => find(tree, node => node.props?.run)?.props.run;
+
+test('accepted start remains active before SSE catches up and rejects duplicate clicks', async () => {
+  const previous = sampleRun('previous', 'completed');
+  const react = hooks([liveState([previous]), true, 'live', '']);
+  const { Client } = await load('App.tsx', react);
+  let finish;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return new Promise(resolve => { finish = resolve; }); };
+  const tree = renderClient(Client, react);
+  const first = submitClient(tree);
+  await submitClient(tree);
+  assert.equal(calls, 1);
+  finish(new Response(JSON.stringify({ id: 'accepted', run: sampleRun('accepted') }), { status: 202 }));
+  await first;
+  const pending = renderClient(Client, react);
+  assert.equal(stopButton(pending).props.disabled, false);
+  assert.equal(activityRun(pending).id, 'accepted');
+  assert.equal(activityRun(pending).status, 'running');
+  await submitClient(pending);
+  assert.equal(calls, 1);
+  react.states[0] = liveState([previous, sampleRun('accepted', 'completed', 3)]);
+  assert.equal(activityRun(renderClient(Client, react)).status, 'completed');
+});
+
+test('409 restores a hidden approval, links its console card, and allows Stop with stale SSE', async () => {
+  const hidden = { ...sampleRun('hidden-task', 'awaiting_approval', 5), approvals: [{ id: 'approval-1', run_id: 'hidden-task', status: 'pending' }] };
+  const react = hooks([liveState([sampleRun('previous', 'completed')]), true, 'live', '']);
+  const { Client } = await load('App.tsx', react);
+  const calls = [];
+  globalThis.fetch = async url => {
+    calls.push(url);
+    if (url === '/api/runs') return new Response(JSON.stringify({ detail: {
+      message: 'A previous task hidden-task is waiting for approval in the Airlock console',
+      run_id: hidden.id, status: hidden.status, run: hidden,
+    } }), { status: 409 });
+    return new Response(JSON.stringify(sampleRun(hidden.id, 'cancelled', 8)));
+  };
+  await submitClient(renderClient(Client, react));
+  const recovered = renderClient(Client, react);
+  assert.equal(activityRun(recovered).id, hidden.id);
+  assert.equal(activityRun(recovered).status, 'awaiting_approval');
+  const link = find(recovered, node => node.type === 'a' && node.props.href === '/console?approval=approval-1#approvals');
+  assert.equal(link.props.target, '_blank');
+  assert.equal(stopButton(recovered).props.disabled, false);
+  const banner = find(recovered, node => typeof node.props?.message === 'string' && node.props.message.includes('hidden-task'));
+  assert.match(banner.props.message, /waiting for approval/);
+  await stopButton(recovered).props.onClick();
+  await new Promise(setImmediate);
+  assert.equal(calls[1], '/api/runs/hidden-task/cancel?audience=client');
+  // The older SSE approval must not bring the task back to life after Stop.
+  react.states[0] = liveState([hidden]);
+  const stopped = renderClient(Client, react);
+  assert.equal(activityRun(stopped).status, 'cancelled');
+  assert.equal(stopButton(stopped), undefined);
+});
+
+test('client gives a shared-tab active run precedence over a selected completed task', async () => {
+  const react = hooks([liveState([sampleRun('old', 'completed'), sampleRun('other-tab', 'running', 2)]), true, 'live', '']);
+  const { Client } = await load('App.tsx', react);
+  const tree = renderClient(Client, react);
+  assert.equal(activityRun(tree).id, 'other-tab');
+  assert.equal(stopButton(tree).props.disabled, false);
+});
+
+test('structured conflict details survive API parsing without exposing a raw status label', async () => {
+  const { request, ApiError } = await load('api.ts');
+  const run = sampleRun('pending', 'awaiting_approval');
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: { message: 'Task pending awaits approval', run } }), { status: 409 });
+  await assert.rejects(request('/api/runs'), error => {
+    assert.ok(error instanceof ApiError);
+    assert.equal(error.message, 'Task pending awaits approval');
+    assert.deepEqual(error.detail.run, run);
+    return true;
+  });
+});
+
+test('a payment result followed by a delayed agent summary keeps the task running', async () => {
+  const { ClientActivity } = await load('ClientActivity.tsx');
+  const run = { ...sampleRun('summary'), events: [
+    { id: 'checkout', type: 'checkout', tool: 'create_order', amount: '19.99' },
+    { id: 'result', type: 'tool_result', tool: 'create_order', status: 'succeeded', paypal_id: 'MOCK-ORDER' },
+  ] };
+  const html = renderToStaticMarkup(React.createElement(ClientActivity, { run }));
+  assert.match(html, /Finishing the task/);
+  assert.match(html, /waiting for the agent/);
+  assert.doesNotMatch(html, /Task finished/);
+  const terminal = renderToStaticMarkup(React.createElement(ClientActivity, { run: { ...run, status: 'completed', events: [...run.events, { id: 'terminal', type: 'run_status', status: 'completed' }] } }));
+  assert.match(terminal, /Task finished/);
+  assert.doesNotMatch(terminal, /Current step/);
+});
+
+test('pending client approvals remain visible while policy details stay in the console', async () => {
+  const { ClientActivity } = await load('ClientActivity.tsx');
+  const html = renderToStaticMarkup(React.createElement(ClientActivity, { run: {
+    ...sampleRun('approval', 'awaiting_approval'), events: [
+      { id: 'checkout', type: 'checkout', tool: 'create_order', amount: '249.99' },
+      { id: 'pending', type: 'client_status', status: 'awaiting_approval' },
+    ],
+  } }));
+  assert.match(html, /Waiting for payment approval/);
+  assert.match(html, /Awaiting payment approval/);
+  assert.doesNotMatch(html, /Task finished/);
+});
+
+
+test('a slowly stopping run remains active and exposes a retryable Stop', async () => {
+  const stopping = sampleRun('stopping', 'cancelling', 10);
+  const react = hooks([liveState([stopping]), true, 'live', '']);
+  const { Client } = await load('App.tsx', react);
+  let calls = 0;
+  globalThis.fetch = async url => {
+    calls++;
+    assert.equal(url, '/api/runs/stopping/cancel?audience=client');
+    return new Response(JSON.stringify(stopping));
+  };
+  const tree = renderClient(Client, react);
+  assert.equal(stopButton(tree).props.disabled, false);
+  await submitClient(tree);
+  assert.equal(calls, 0);
+  await stopButton(tree).props.onClick();
+  await new Promise(setImmediate);
+  assert.equal(calls, 1);
+  assert.equal(stopButton(renderClient(Client, react)).props.disabled, false);
+});
+
+test('console deep link keeps its selected approval while the initial inbox is loading', async () => {
+  const previousLocation = globalThis.location;
+  globalThis.location = { pathname: '/console', search: '?approval=target-approval', hash: '#approvals' };
+  try {
+    const react = hooks([liveState([]), false, 'connecting', '']);
+    const { Console } = await load('App.tsx', react);
+    renderClient(Console, react);
+    // The initial empty stream does not erase the deep-link selection.
+    react.effects[1]();
+    const approval = { id: 'target-approval', status: 'pending', tool: 'create_order', amount: '249.99', payee: 'shop@example.com', reason: 'Review' };
+    react.states[0] = liveState([{ ...sampleRun('pending', 'awaiting_approval'), approvals: [approval] }]);
+    react.states[1] = true;
+    react.states[2] = 'live';
+    const tree = renderClient(Console, react);
+    const inbox = find(tree, node => Array.isArray(node.props?.approvals));
+    assert.equal(inbox.props.selected, 'target-approval');
+    assert.equal(inbox.props.approvals[0].id, 'target-approval');
+  } finally {
+    if (previousLocation === undefined) delete globalThis.location;
+    else globalThis.location = previousLocation;
+  }
+});
+
+
+test('a restored-run GET cannot overwrite a newer Stop response', async () => {
+  const running = sampleRun('restored', 'running', 3);
+  const react = hooks([liveState([]), true, 'live', '', 'Buy headphones', 'restored', '', false, running]);
+  const { Client } = await load('App.tsx', react);
+  let finishGet;
+  globalThis.fetch = async url => {
+    if (url === '/api/runs/restored?audience=client') return new Promise(resolve => { finishGet = resolve; });
+    assert.equal(url, '/api/runs/restored/cancel?audience=client');
+    return new Response(JSON.stringify(sampleRun('restored', 'cancelled', 6)));
+  };
+  const tree = renderClient(Client, react);
+  react.effects[3]();
+  await stopButton(tree).props.onClick();
+  await new Promise(setImmediate);
+  finishGet(new Response(JSON.stringify(running)));
+  await new Promise(setImmediate);
+  assert.equal(activityRun(renderClient(Client, react)).status, 'cancelled');
+});
+
+test('a selected active response is cleared when the restarted server no longer has its run', async () => {
+  const react = hooks([liveState([]), true, 'live', '', 'Buy headphones', 'lost', '', false, sampleRun('lost')]);
+  const { Client } = await load('App.tsx', react);
+  globalThis.fetch = async url => {
+    assert.equal(url, '/api/runs/lost?audience=client');
+    return new Response(JSON.stringify({ detail: 'Run not found' }), { status: 404 });
+  };
+  renderClient(Client, react);
+  react.effects[3]();
+  await new Promise(setImmediate);
+  const tree = renderClient(Client, react);
+  assert.equal(activityRun(tree), undefined);
+  assert.equal(stopButton(tree), undefined);
+  assert.match(find(tree, node => typeof node.props?.message === 'string' && node.props.message.includes('no longer available')).props.message, /server restarted/);
+});
+
+
+// Execute effects with dependency tracking and follow state changes through
+// rerenders, including the reconciliation effect after a Stop response.
+function effectHooks(overrides) {
+  const base = hooks(overrides);
+  const slots = [];
+  let cursor = 0;
+  let pending = [];
+  return {
+    ...base,
+    reset() { base.reset(); cursor = 0; pending = []; },
+    useEffect(effect, deps) {
+      const index = cursor++;
+      const previous = slots[index];
+      if (!previous || !deps || deps.some((value, i) => !Object.is(value, previous.deps?.[i]))) {
+        pending.push({ index, effect, deps });
+      }
+    },
+    flush() {
+      for (const { index, effect, deps } of pending) {
+        slots[index]?.cleanup?.();
+        slots[index] = { deps, cleanup: effect() };
+      }
+      pending = [];
+    },
+    dispose() { for (const slot of slots) slot?.cleanup?.(); },
+  };
+}
+function renderWithEffects(Client, react) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const tree = renderClient(Client, react);
+    const before = [...react.states];
+    react.flush();
+    if (react.states.length === before.length && react.states.every((value, i) => Object.is(value, before[i]))) return tree;
+  }
+  throw new Error('Client effects did not stabilize');
+}
+
+test('Stop before the first SSE frame survives all reconciliation effects and late GET/SSE replies', async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {};
+  globalThis.EventSource = class { addEventListener() {} close() {} };
+  const running = sampleRun('not-in-sse-yet', 'running', 3);
+  const react = effectHooks([liveState([]), true, 'live', '', 'Buy headphones', running.id, '', false, running]);
+  try {
+    const { Client } = await load('App.tsx', react);
+    let finishGet;
+    globalThis.fetch = async url => {
+      if (url === `/api/runs/${running.id}?audience=client`) return new Promise(resolve => { finishGet = resolve; });
+      assert.equal(url, `/api/runs/${running.id}/cancel?audience=client`);
+      return new Response(JSON.stringify(sampleRun(running.id, 'cancelled', 6)));
+    };
+    const initial = renderWithEffects(Client, react);
+    assert.ok(finishGet);
+    await stopButton(initial).props.onClick();
+    await new Promise(setImmediate);
+    // This render executes the response reconciliation effect with remote absent.
+    const stopped = renderWithEffects(Client, react);
+    assert.equal(activityRun(stopped).status, 'cancelled');
+    assert.equal(stopButton(stopped), undefined);
+    finishGet(new Response(JSON.stringify(running)));
+    await new Promise(setImmediate);
+    assert.equal(activityRun(renderWithEffects(Client, react)).status, 'cancelled');
+    react.states[0] = liveState([running]);
+    const staleFrame = renderWithEffects(Client, react);
+    assert.equal(activityRun(staleFrame).status, 'cancelled');
+    assert.equal(stopButton(staleFrame), undefined);
+    react.states[0] = liveState([sampleRun(running.id, 'cancelled', 6)]);
+    assert.equal(activityRun(renderWithEffects(Client, react)).status, 'cancelled');
+    assert.equal(react.states[8], null);
+  } finally {
+    react.dispose();
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+
+test('a terminal-status 409 remains recoverable through Stop even when SSE has the same revision', async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {};
+  globalThis.EventSource = class { addEventListener() {} close() {} };
+  const completed = sampleRun('unfinished-worker', 'completed', 7);
+  const react = effectHooks([liveState([completed]), true, 'live', '']);
+  try {
+    const { Client } = await load('App.tsx', react);
+    const calls = [];
+    globalThis.fetch = async url => {
+      calls.push(url);
+      if (url === '/api/runs') return new Response(JSON.stringify({ detail: {
+        message: 'Task unfinished-worker is still finishing on the server', status: 'completed', run: completed,
+      } }), { status: 409 });
+      assert.equal(url, '/api/runs/unfinished-worker/cancel?audience=client');
+      return new Response(JSON.stringify(sampleRun(completed.id, 'cancelled', 8)));
+    };
+    await submitClient(renderWithEffects(Client, react));
+    const conflict = renderWithEffects(Client, react);
+    assert.equal(activityRun(conflict).status, 'completed');
+    assert.equal(activityRun(conflict).blocking, true);
+    assert.equal(stopButton(conflict).props.disabled, false);
+    assert.ok(find(conflict, node => node.type === 'span' && String(node.props.children).includes('still finishing on the server')));
+    // A repeated same-revision state frame cannot discard the recovery handle.
+    react.states[0] = liveState([{ ...completed }]);
+    const repeated = renderWithEffects(Client, react);
+    assert.equal(activityRun(repeated).blocking, true);
+    await submitClient(repeated);
+    assert.equal(calls.length, 1);
+    await stopButton(repeated).props.onClick();
+    await new Promise(setImmediate);
+    const stopped = renderWithEffects(Client, react);
+    assert.equal(activityRun(stopped).status, 'cancelled');
+    assert.equal(activityRun(stopped).blocking, undefined);
+    assert.equal(stopButton(stopped), undefined);
+  } finally {
+    react.dispose();
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test('a run stopped from another tab is selected and disappears after a confirmed reset', async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {};
+  globalThis.EventSource = class { addEventListener() {} close() {} };
+  const running = sampleRun('other-tab-reset', 'running', 3);
+  const react = effectHooks([liveState([running]), true, 'live', '']);
+  try {
+    const { Client } = await load('App.tsx', react);
+    globalThis.fetch = async url => url.includes('/cancel?')
+      ? new Response(JSON.stringify(sampleRun(running.id, 'cancelled', 6)))
+      : new Response(JSON.stringify({ detail: 'Run not found' }), { status: 404 });
+    const initial = renderWithEffects(Client, react);
+    await stopButton(initial).props.onClick();
+    await new Promise(setImmediate);
+    assert.equal(activityRun(renderWithEffects(Client, react)).status, 'cancelled');
+    assert.equal(react.states[5], running.id);
+    react.states[0] = liveState([]);
+    renderWithEffects(Client, react);
+    await new Promise(setImmediate);
+    assert.equal(activityRun(renderWithEffects(Client, react)), undefined);
+  } finally {
+    react.dispose();
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+
+test('a same-revision GET cannot remove Stop from a terminal conflict absent from SSE', async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {};
+  globalThis.EventSource = class { addEventListener() {} close() {} };
+  const completed = sampleRun('terminal-not-in-sse', 'completed', 7);
+  const react = effectHooks([liveState([]), true, 'live', '']);
+  try {
+    const { Client } = await load('App.tsx', react);
+    const calls = [];
+    globalThis.fetch = async url => {
+      calls.push(url);
+      if (url === '/api/runs') return new Response(JSON.stringify({ detail: {
+        message: 'This completed task is still finishing', status: 'completed', run: completed,
+      } }), { status: 409 });
+      if (url === `/api/runs/${completed.id}?audience=client`) return new Response(JSON.stringify(completed));
+      assert.equal(url, `/api/runs/${completed.id}/cancel?audience=client`);
+      return new Response(JSON.stringify(sampleRun(completed.id, 'cancelled', 8)));
+    };
+    await submitClient(renderWithEffects(Client, react));
+    renderWithEffects(Client, react); // Starts the recovery GET for selected missing from SSE.
+    await new Promise(setImmediate);
+    assert.equal(calls[1], `/api/runs/${completed.id}?audience=client`);
+    const recovered = renderWithEffects(Client, react);
+    assert.equal(activityRun(recovered).status, 'completed');
+    assert.equal(activityRun(recovered).blocking, true);
+    assert.equal(stopButton(recovered).props.disabled, false);
+    await stopButton(recovered).props.onClick();
+    await new Promise(setImmediate);
+    const stopped = renderWithEffects(Client, react);
+    assert.equal(activityRun(stopped).status, 'cancelled');
+    assert.equal(stopButton(stopped), undefined);
+  } finally {
+    react.dispose();
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
   }
 });

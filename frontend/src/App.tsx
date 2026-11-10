@@ -1,11 +1,11 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { ApiError, request } from './api';
 import { ClientActivity } from './ClientActivity';
 import { VoltStore } from './VoltStore';
 import { EventDetail } from './EventDetail';
 import { FlaggedEvents } from './FlaggedEvents';
 import { ConsoleLink, eventMoney, eventPath, navigateConsole } from './consoleNavigation';
-import { displayText, isRunActive, RUN_UNAVAILABLE } from './runUpdates';
+import { approvalHref, conflictRun, displayText, isRunActive, isRunBlocking, reconcileRuns, RUN_UNAVAILABLE } from './runUpdates';
 import type { Approval, AuditRow, Explainable, Mode, Run } from './types';
 import { useLive } from './useLive';
 import { Icon, Badge, Connection, ErrorBanner, type IconName } from './ui';
@@ -32,7 +32,7 @@ function rememberSelectedRun(id: string | null) {
     if (id) sessionStorage.setItem('airlock-client-run', id);else sessionStorage.removeItem('airlock-client-run');
   } catch {/* The workspace remains usable without browser storage. */}
 }
-function Client() {
+export function Client() {
   const {
     state,
     ready,
@@ -41,71 +41,98 @@ function Client() {
   } = useLive('client');
   const {
     config,
-    runs,
+    runs: liveRuns,
     wallet
   } = state;
   const [input, setInput] = useState(purchase);
   const [selected, setSelected] = useState(() => readSelectedRun());
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [responseRun, setResponseRun] = useState<Run | null>(null);
+  const actionInFlight = useRef(false);
+  const runs = reconcileRuns(liveRuns, responseRun);
+  useEffect(() => {
+    if (!responseRun || responseRun.blocking) return;
+    const remote = liveRuns.find(item => item.id === responseRun.id);
+    if (remote && (remote.revision ?? -1) >= (responseRun.revision ?? 0)) setResponseRun(null);
+  }, [liveRuns, responseRun]);
   useEffect(() => {
     document.title = 'Agentic Payment Client';
   }, []);
-  const runningRun = runs.find(run => isRunActive(run.status));
+  const runningRun = runs.find(isRunBlocking);
   const run = runningRun || runs.find(item => item.id === selected) || runs.at(-1);
   const active = busy || Boolean(runningRun);
   useEffect(() => {
-    if (!selected || connection !== 'live' || runs.some(item => item.id === selected)) return;
+    if (!selected || connection !== 'live' || liveRuns.some(item => item.id === selected)) return;
     let stale = false;
-    void request<Run>(`/api/runs/${selected}`, {
+    void request<Run>(`/api/runs/${selected}?audience=client`, {
       signal: AbortSignal.timeout(10000)
+    }).then(value => {
+      if (!stale) setResponseRun(current => current?.id === value.id && (current.blocking || (current.revision ?? 0) > (value.revision ?? 0)) ? current : value);
     }).catch(err => {
       if (!stale && err instanceof ApiError && err.status === 404) {
         rememberSelectedRun(null);
         setSelected(null);
+        setResponseRun(null);
         setError(RUN_UNAVAILABLE);
       }
     });
     return () => {
       stale = true;
     };
-  }, [selected, runs, connection]);
+  }, [selected, liveRuns, connection]);
   async function start(event: React.FormEvent) {
     event.preventDefault();
-    if (!input.trim() || active || connection !== 'live') return;
+    if (!input.trim() || active || actionInFlight.current || connection !== 'live') return;
+    actionInFlight.current = true;
     setBusy(true);
     setError('');
     try {
-      const {
-        id
-      } = await request<{
-        id: string;
-      }>('/api/runs', {
+      const result = await request<{ id: string; run?: Run }>('/api/runs', {
         method: 'POST',
         signal: AbortSignal.timeout(15000),
         body: JSON.stringify({
           message: input.trim()
         })
       });
-      setSelected(id);
-      rememberSelectedRun(id);
+      setSelected(result.id);
+      rememberSelectedRun(result.id);
+      setResponseRun(result.run || { id: result.id, status: 'running', revision: 0, messages: [{ role: 'user', content: input.trim() }], events: [], approvals: [] });
     } catch (err) {
+      const previous = conflictRun(err);
+      if (previous) {
+        setResponseRun(previous);
+        setSelected(previous.id);
+        rememberSelectedRun(previous.id);
+      }
       setError((err as Error).message);
     } finally {
+      actionInFlight.current = false;
       setBusy(false);
     }
   }
   async function stop() {
-    if (!runningRun || busy) return;
+    if (!runningRun || busy || actionInFlight.current) return;
+    actionInFlight.current = true;
     setBusy(true);
+    setError('');
     try {
-      await request(`/api/runs/${runningRun.id}/cancel`, {
+      const stopped = await request<Run>(`/api/runs/${runningRun.id}/cancel?audience=client`, {
         method: 'POST',
         signal: AbortSignal.timeout(10000)
       });
+      setResponseRun(stopped);
+      setSelected(stopped.id);
+      rememberSelectedRun(stopped.id);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        setResponseRun(null);
+        setSelected(null);
+        rememberSelectedRun(null);
+      }
       setError(err instanceof ApiError && err.status === 404 ? RUN_UNAVAILABLE : (err as Error).message);
     } finally {
+      actionInFlight.current = false;
       setBusy(false);
     }
   }
@@ -143,6 +170,11 @@ function Client() {
         <p>Find products and send payments through your agent.</p>
       </div>
       <ErrorBanner message={error || liveError} onClose={error ? () => setError('') : undefined} />
+      {runningRun && <div className="connection-notice task-status-notice" role="status">
+        <strong>Task {runningRun.id.slice(0, 8)} · {runningRun.status.replaceAll('_', ' ')}</strong>
+        <span>{runningRun.blocking ? 'This task is still finishing on the server. Stop it before starting another task.' : runningRun.status === 'awaiting_approval' ? 'This task is waiting for payment approval in the Airlock console. Review the request or stop this task to continue.' : runningRun.status === 'cancelling' ? 'This task is stopping. Wait for the current request to finish, or retry Stop.' : 'The agent is still working. You can stop this task before starting another.'}</span>
+        {runningRun.status === 'awaiting_approval' && <a className="button secondary" href={approvalHref(runningRun)} target="_blank" rel="noopener noreferrer">Review approval<Icon name="external" size={14} /></a>}
+      </div>}
       <form className="task-composer" onSubmit={start}>
         <label htmlFor="task">Task</label>
         <div className="task-input-row">
@@ -166,7 +198,7 @@ function Client() {
             </span>
           </div>
           {(run?.agent_mode === 'compromised' || !run && config.demo_mode) && <Badge>Scripted agent</Badge>}
-          {run && <Badge tone={isRunActive(run.status) ? 'blue' : ''}>
+          {run && <Badge tone={isRunBlocking(run) ? 'blue' : ''}>
             {run.status.replaceAll('_', ' ')}
           </Badge>}
         </div>
@@ -395,7 +427,7 @@ function ApprovalInbox({
       behavior: 'smooth',
       block: 'center'
     });
-  }, [selected]);
+  }, [selected, approvals.length]);
   if (!approvals.length) return <div className="empty-panel">
     <span className="empty-symbol">
       <Icon name="approval" size={27} />
@@ -496,7 +528,7 @@ const navItems: {
   icon: 'audit',
   description: 'Search decisions, payment execution, and configuration changes.'
 }];
-function Console() {
+export function Console() {
   const {
     state,
     ready,
@@ -519,9 +551,9 @@ function Console() {
   const [resetMessage, setResetMessage] = useState('');
   const [answering, setAnswering] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [selectedApproval, setSelectedApproval] = useState('');
+  const [selectedApproval, setSelectedApproval] = useState(() => new URLSearchParams(location.search).get('approval') || '');
   const [dismissed, setDismissed] = useState<string[]>([]);
-  const approvals = runs.flatMap(run => (run.approvals || []).map(approval => ({
+  const approvals = runs.flatMap(run => (run.approvals || []).filter((approval): approval is Approval => 'tool' in approval).map(approval => ({
     ...approval,
     user_request: approval.user_request || run.messages.find(message => message.role === 'user')?.content
   }))).filter(approval => ['pending', 'awaiting_approval'].includes(approval.status));
@@ -537,7 +569,7 @@ function Console() {
   useEffect(() => {
     if (!runs.length && !audit.rows.length) {
       setExpanded({});
-      setSelectedApproval('');
+      if (!new URLSearchParams(location.search).has('approval')) setSelectedApproval('');
       setDismissed([]);
     }
   }, [runs.length, audit.rows.length]);
