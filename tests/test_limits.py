@@ -153,3 +153,13 @@ def test_abuse_settings_env_and_validation(monkeypatch):
     for kwargs in [{"run_rate_limit_per_minute":0},{"run_rate_limit_per_hour":-1},{"daily_llm_call_limit":-1}]:
         with pytest.raises(ValueError):
             Settings(**kwargs)
+
+
+def test_exempt_ip_skips_run_rate_limit(tmp_path):
+    app = create_app(Settings(sqlite_path=str(tmp_path/"audit.sqlite3"), run_rate_limit_per_minute=1, run_rate_limit_per_hour=1,
+        rate_limit_exempt_ips=frozenset({"198.51.100.7"})), paypal=MockPayPal(), judge=RuleJudge())
+    with TestClient(app) as client:
+        for _ in range(3):
+            response = client.post("/api/runs", json={"message":"hello"}, headers={"X-Forwarded-For":"198.51.100.7"})
+            assert response.status_code == 202
+            poll(client, response.json()["id"])

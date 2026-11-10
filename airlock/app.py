@@ -199,7 +199,8 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
 
     @app.post("/api/runs",status_code=202)
     async def start(body: StartRun, request: Request):
-        retry_after = rate_limiter.check(client_ip(request))
+        ip = client_ip(request)
+        retry_after = None if ip in settings.rate_limit_exempt_ips else rate_limiter.check(ip)
         if retry_after is not None:
             raise HTTPException(429, f"Too many demo runs from your IP. Please try again in {retry_after} seconds.", headers={"Retry-After": str(retry_after)})
         if not body.message.strip():

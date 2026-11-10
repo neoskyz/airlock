@@ -28,6 +28,7 @@ class Settings:
     shop_email: str = "shop@chargers.example"
     run_rate_limit_per_minute: int = 5
     run_rate_limit_per_hour: int = 30
+    rate_limit_exempt_ips: frozenset = frozenset()
     daily_llm_call_limit: int = 500
     frontend_dist: str = str(ROOT / "frontend/dist")
 
@@ -75,6 +76,7 @@ class Settings:
             initial_mode=os.getenv("AIRLOCK_MODE", "Monitor"),
             run_rate_limit_per_minute=int(os.getenv("RUN_RATE_LIMIT_PER_MINUTE", "5")),
             run_rate_limit_per_hour=int(os.getenv("RUN_RATE_LIMIT_PER_HOUR", "30")),
+            rate_limit_exempt_ips=frozenset(ip.strip() for ip in os.getenv("RATE_LIMIT_EXEMPT_IPS", "").split(",") if ip.strip()),
             daily_llm_call_limit=int(os.getenv("DAILY_LLM_CALL_LIMIT", "500")),
             openai_api_key=os.getenv("OPENAI_API_KEY", ""),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
