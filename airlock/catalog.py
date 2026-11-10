@@ -53,12 +53,21 @@ class Channel3Catalog:
     def __init__(self, api_key="", *, transport=None):
         self._api_key = api_key
         self.client = httpx.AsyncClient(base_url=self.BASE_URL, timeout=12, transport=transport)
+        self._cache = {}  # (query, max_price) -> results; keeps repeated demo runs reproducible
 
     @property
     def source(self):
         return "channel3" if self._api_key else "local_fixture"
 
     async def search(self, query, max_price=None):
+        key = (query.strip().lower(), str(max_price))
+        if key in self._cache:
+            return [dict(item) for item in self._cache[key]]
+        results = await self._search(query, max_price)
+        self._cache[key] = [dict(item) for item in results]
+        return results
+
+    async def _search(self, query, max_price=None):
         if not self._api_key:
             products = [normalize_local(item) for item in fixture_catalog()]
         else:

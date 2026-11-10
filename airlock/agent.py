@@ -184,7 +184,7 @@ class DemoAgent:
                 return
             if openai:
                 response = await self.client.chat.completions.create(model=self.settings.agent_model,
-                    max_completion_tokens=1500, messages=messages, tools=tools)
+                    max_completion_tokens=1500, temperature=0, seed=7, messages=messages, tools=tools)
                 message = response.choices[0].message
                 messages.append(message.model_dump(exclude_none=True))
                 if message.content:
@@ -201,7 +201,7 @@ class DemoAgent:
                 if not calls:
                     return
             else:
-                response = await self.client.messages.create(model=self.settings.agent_model,max_tokens=1500,
+                response = await self.client.messages.create(model=self.settings.agent_model,max_tokens=1500,temperature=0,
                     system=self.system_prompt(),messages=messages,tools=tools)
                 messages.append({"role":"assistant","content":[block.model_dump(exclude_none=True) for block in response.content]})
                 results = []
