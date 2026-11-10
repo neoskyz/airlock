@@ -251,19 +251,23 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
             # No await before cancellation: approval resolution cannot interleave here.
             run.status = "cancelled"
             approvals.cancel_run(run)
-            audit.record_run_cancellation(run.id, run.firewall_enabled, paypal.mock)
             task = run_tasks.get(identifier)
             if task is not None:
                 task.cancel()
+            # A failed cancellation audit must not leave the agent running.
+            audit.record_run_cancellation(run.id, run.firewall_enabled, paypal.mock)
             await run.say("Run cancelled. Submitted PayPal calls are not rolled back; check the sandbox before retrying a payment.")
             await run.emit({"type":"cancelled", "status":"cancelled", "message":"Run cancelled by user."})
         return run.snapshot()
 
     @app.post("/api/approvals/{identifier}")
     async def resolve_approval(identifier: str,body: ApprovalChoice):
-        if not approvals.resolve(identifier,body.approved):
+        if not approvals.can_resolve(identifier):
             raise HTTPException(409,"Approval is absent or already resolved")
+        # Persist the operator's choice before waking the payment task. There
+        # is no await here, so cancellation and duplicate answers cannot race.
         audit.record_approval(identifier, "approved" if body.approved else "denied", actor="Sandbox console operator (unauthenticated)")
+        approvals.resolve(identifier,body.approved)
         return {"id":identifier,"approved":body.approved}
 
     @app.get("/api/audit")

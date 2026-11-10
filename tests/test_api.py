@@ -459,3 +459,56 @@ def test_configuration_does_not_change_when_audit_write_fails(tmp_path):
         assert client.post("/api/runs", json={"message":"Buy me a USB-C charger under $40", "firewall_enabled":False}).status_code == 500
         assert client.get("/api/mode").json()["mode"] == "Enforce"
         assert not app.state.runs
+
+
+def test_approval_audit_failure_keeps_payment_pending_until_successful_retry(tmp_path):
+    import sqlite3
+    from unittest.mock import AsyncMock, Mock
+
+    paypal = MockPayPal()
+    paypal.execute = AsyncMock(wraps=paypal.execute)
+    app = create_app(Settings(initial_mode="Enforce", demo_mode=True, sqlite_path=str(tmp_path/"approval-audit-failure.sqlite3")), paypal=paypal, judge=RuleJudge())
+    with TestClient(app, raise_server_exceptions=False) as client:
+        run_id = client.post("/api/runs", json={"message":"Buy me noise-cancelling headphones under $300"}).json()["id"]
+        run = poll(client, run_id, "awaiting_approval")
+        identifier = run["approvals"][0]["id"]
+        original_record = app.state.audit.record_approval
+        app.state.audit.record_approval = Mock(side_effect=sqlite3.OperationalError("Audit write failed"))
+        assert client.post(f"/api/approvals/{identifier}", json={"approved":True}).status_code == 500
+        time.sleep(.03)
+        assert client.get(f"/api/runs/{run_id}").json()["status"] == "awaiting_approval"
+        event = client.get(f"/api/audit/{identifier}").json()
+        assert event["status"] == "awaiting_approval"
+        assert [entry["action"] for entry in event["approval_history"]] == ["requested"]
+        paypal.execute.assert_not_awaited()
+        app.state.audit.record_approval = original_record
+        assert client.post(f"/api/approvals/{identifier}", json={"approved":True}).status_code == 200
+        poll(client, run_id)
+        assert client.post(f"/api/approvals/{identifier}", json={"approved":True}).status_code == 409
+        paypal.execute.assert_awaited_once()
+        event = client.get(f"/api/audit/{identifier}").json()
+        assert [entry["action"] for entry in event["approval_history"]] == ["requested", "approved"]
+
+
+def test_cancellation_audit_failure_still_stops_agent_before_payment(tmp_path):
+    import sqlite3
+    from unittest.mock import AsyncMock, Mock
+
+    paypal = MockPayPal()
+    paypal.execute = AsyncMock(wraps=paypal.execute)
+    app = create_app(Settings(initial_mode="Enforce", demo_mode=True, sqlite_path=str(tmp_path/"cancel-audit-failure.sqlite3")), paypal=paypal, judge=RuleJudge())
+    with TestClient(app, raise_server_exceptions=False) as client:
+        run_id = client.post("/api/runs", json={"message":"Buy me the cheapest 65W USB-C charger under $40"}).json()["id"]
+        for _ in range(100):
+            run = client.get(f"/api/runs/{run_id}").json()
+            if any(event["type"] == "product_page" for event in run["events"]):
+                break
+            time.sleep(.001)
+        assert run["status"] == "running"
+        paypal.execute.assert_not_awaited()
+        app.state.audit.record_run_cancellation = Mock(side_effect=sqlite3.OperationalError("Audit write failed"))
+        assert client.post(f"/api/runs/{run_id}/cancel").status_code == 500
+        time.sleep(.2)
+        assert client.get(f"/api/runs/{run_id}").json()["status"] == "cancelled"
+        paypal.execute.assert_not_awaited()
+        assert not client.get("/api/audit").json()["rows"]

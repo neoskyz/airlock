@@ -70,8 +70,10 @@ class Firewall:
                     # outcome. Never include callback text or secrets in logs.
                     logging.getLogger(__name__).warning("Payment event observer failed: %s", type(exc).__name__)
 
+        known_payee = self.audit.has_payee(call.payee)
+        recent_calls = self.audit.recent_count()
         score, factors, tainted, excerpt, source = score_call(call, provenance, policy,
-            known_payee=self.audit.has_payee(call.payee), recent_calls=self.audit.recent_count())
+            known_payee=known_payee, recent_calls=recent_calls)
         preliminary = policy.evaluate(call, initial_reserved)
         rules_ms = (perf_counter()-started)*1000
         review_ms, ai_review, review_failed = 0.0, "skipped (low risk)", False
@@ -133,11 +135,54 @@ class Firewall:
                     factors.append(RiskFactor(name="Period budget", points=0, reason=hard.reason))
             return verdict.model_copy(update={"decision":hard.decision, "reason":reason, "policy":hard.policy, "factors":factors})
 
+        def assess_current_policy(reserved, stage):
+            # Keep the initial risk factors immutable. A policy edit changes
+            # execution eligibility, with its own score and evidence snapshot.
+            current = self.policy.model_copy(deep=True)
+            current_score, current_factors, current_taint, _, _ = score_call(
+                call, provenance, current, known_payee=known_payee, recent_calls=recent_calls)
+            needs_review = (30 <= current_score <= 84 or current_taint) and not review_invoked
+            if judgment and not review_failed:
+                delta = judgment.score_adjustment
+                if judgment.decision == Decision.BLOCK:
+                    delta = max(delta, min(10, max(0, 92-current_score)))
+                adjusted = max(0, min(100, current_score+delta))
+                if adjusted != current_score:
+                    current_factors.append(RiskFactor(name="Intent review", points=adjusted-current_score, reason=judgment.reason))
+                current_score = adjusted
+            final = current.evaluate(call, reserved, risk_score=current_score)
+            if final.policy == "risk_threshold" and judgment and not review_failed and judgment.decision == Decision.BLOCK:
+                final = Verdict(decision=Decision.BLOCK, reason=judgment.reason, policy="risk_threshold")
+            # Hard constraints always win. Preserve the established review
+            # failure path: an unavailable judge requires human approval even
+            # when taint alone puts the computed score above the risk cutoff.
+            if final.decision != Decision.BLOCK or (review_failed and final.policy == "risk_threshold" and stage != "after_approval"):
+                if review_failed or needs_review:
+                    reason = ("Intent review unavailable or invalid — fail-closed to human approval" if review_failed else
+                              "Policy changed; intent review was not performed for the current risk — human approval required")
+                    final = Verdict(decision=Decision.REQUIRE_APPROVAL, reason=reason, policy="risk_threshold")
+                elif judgment and judgment.decision == Decision.REQUIRE_APPROVAL:
+                    final = Verdict(decision=Decision.REQUIRE_APPROVAL, reason=judgment.reason, policy="risk_threshold")
+            if judgment and not review_failed and final.decision == Decision.ALLOW:
+                final.reason += "; " + judgment.reason
+            evidence = {
+                "stage":stage, "decision":final.decision.value, "policy_snapshot":current.model_dump(mode="json"),
+                "risk_score":current_score, "factors":[factor.model_dump(mode="json") for factor in current_factors],
+                "policy_checks":current.checks(call, reserved, risk_score=current_score,
+                    review_required=review_failed or needs_review or bool(judgment and judgment.decision != Decision.ALLOW)),
+            }
+            if needs_review:
+                evidence["ai_review"] = "not performed after policy change — human approval required"
+            return final, evidence
+
         async with self._budget_lock:
             # Recheck after asynchronous review and reserve before yielding.
-            budget_check = self.policy.evaluate(call, self.audit.reserve_total(self.policy.period))
-            if budget_check.decision == Decision.BLOCK:
-                verdict = apply_hard_block(budget_check)
+            reserved = self.audit.reserve_total(self.policy.period)
+            current_check, current_evidence = assess_current_policy(reserved, "before_execution")
+            if current_check.decision == Decision.BLOCK:
+                verdict = apply_hard_block(current_check)
+            else:
+                verdict = verdict.model_copy(update={"decision":current_check.decision, "reason":current_check.reason, "policy":current_check.policy})
             status = "blocked" if enforce and verdict.decision == Decision.BLOCK else "awaiting_approval" if enforce and verdict.decision == Decision.REQUIRE_APPROVAL else "executing"
             reserved = self.audit.reserve_total(self.policy.period)
             reviewer = None if not review_invoked else "rules" if getattr(self.judge, "mode", None) == "rules" or ai_review.startswith("rules review") else "AI"
@@ -152,8 +197,7 @@ class Firewall:
                     "suspicious_excerpt":judgment.suspicious_excerpt if judgment else "", "source":judgment.source if judgment else "", "latency_ms":round(review_ms,2)},
             }
             if self.policy.model_dump(mode="json") != evidence["policy_snapshot"] or reserved != initial_reserved:
-                evidence["policy_rechecks"] = [{"stage":"before_execution", "policy_snapshot":self.policy.model_dump(mode="json"),
-                    "policy_checks":self.policy.checks(call, reserved, risk_score=score)}]
+                evidence["policy_rechecks"] = [current_evidence]
             audit_id = self.audit.insert(call, verdict, run_id, enforce, mock, provenance.serialize(), status, evidence=evidence)
         outcome = {"computed_decision":verdict.decision.value,
                    "enforced_decision":verdict.decision.value if enforce else "ALLOW",
@@ -169,8 +213,24 @@ class Firewall:
                 self.audit.update(audit_id, status="cancelled", decision="BLOCK", reason="Payment cancelled before provider execution")
             self.audit.update_metadata(audit_id, latency={**verdict.latency.model_dump(), "end_to_end_ms":round((perf_counter()-started)*1000,2)})
             raise
+        late_block = False
+        if verdict.decision != Decision.BLOCK and self.policy.model_dump(mode="json") != current_evidence["policy_snapshot"]:
+            async with self._budget_lock:
+                reserved = max(self.audit.reserve_total(self.policy.period)-call.amount, 0)
+                current_check, current_evidence = assess_current_policy(reserved, "before_provider")
+                rechecks = self.audit.event(audit_id).get("policy_rechecks", [])
+                self.audit.update_metadata(audit_id, policy_rechecks=[*rechecks, current_evidence])
+                if current_check.decision != Decision.ALLOW:
+                    verdict = verdict.model_copy(update={"decision":current_check.decision, "reason":current_check.reason, "policy":current_check.policy})
+                    if enforce:
+                        status = "blocked" if verdict.decision == Decision.BLOCK else "awaiting_approval"
+                        late_block = status == "blocked"
+                        self.audit.update(audit_id, status=status, decision=verdict.decision.value, reason=verdict.reason)
+                        outcome.update(enforced_decision=verdict.decision.value, display_decision=decision_label(verdict.decision, mode))
         if enforce and verdict.decision == Decision.BLOCK:
             self.audit.update_metadata(audit_id, latency={**verdict.latency.model_dump(), "end_to_end_ms":round((perf_counter()-started)*1000,2)})
+            if late_block:
+                await send(type="tool_result",id=audit_id+":blocked",decision="BLOCK",status="blocked",message=verdict.reason,**outcome,**details)
             return {"decision":"BLOCK","status":"blocked","reason":verdict.reason,**outcome}
         if enforce and verdict.decision == Decision.REQUIRE_APPROVAL:
             approval_started = perf_counter()
@@ -197,16 +257,18 @@ class Firewall:
                 return {"decision":"BLOCK","status":"denied",**outcome}
             async with self._budget_lock:
                 reserved = max(self.audit.reserve_total(self.policy.period)-call.amount,0)
-                final = self.policy.evaluate(call,reserved,risk_score=verdict.risk_score)
+                final, final_evidence = assess_current_policy(reserved, "after_approval")
                 rechecks = self.audit.event(audit_id).get("policy_rechecks", [])
-                self.audit.update_metadata(audit_id, policy_rechecks=[*rechecks, {"stage":"after_approval", "policy_snapshot":self.policy.model_dump(mode="json"), "policy_checks":self.policy.checks(call, reserved, risk_score=verdict.risk_score)}])
+                self.audit.update_metadata(audit_id, policy_rechecks=[*rechecks, final_evidence])
                 if final.decision == Decision.BLOCK:
                     self.audit.update_metadata(audit_id, latency={**latency, "end_to_end_ms":round((perf_counter()-started)*1000,2)})
                     self.audit.update(audit_id,status="blocked",decision="BLOCK",reason=final.reason)
                     outcome.update(enforced_decision="BLOCK", display_decision=decision_label(Decision.BLOCK, mode))
-                    await send(type="tool_result",id=audit_id+":blocked",decision="BLOCK",status="blocked",message=final.reason,**outcome,**details)
-                    return {"decision":"BLOCK","status":"blocked",**outcome}
-                self.audit.update(audit_id,status="executing",reason=verdict.reason+"; human approved")
+                else:
+                    self.audit.update(audit_id,status="executing",reason=verdict.reason+"; human approved")
+            if final.decision == Decision.BLOCK:
+                await send(type="tool_result",id=audit_id+":blocked",decision="BLOCK",status="blocked",message=final.reason,**outcome,**details)
+                return {"decision":"BLOCK","status":"blocked",**outcome}
         outcome["enforced_decision"] = "ALLOW"
         execution_started = perf_counter()
         try:

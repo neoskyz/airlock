@@ -264,3 +264,124 @@ def test_threshold_change_during_judge_review_applies_to_decision_but_preserves_
         assert recheck["policy_checks"][4]["outcome"] == "fail"
         audit.close()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("change", ["auto_amount", "allowlist"])
+def test_policy_risk_features_changed_during_review_are_recomputed_before_execution(change):
+    async def scenario():
+        audit = AuditStore(":memory:")
+        policy = Policy(allowed_payees=["shop", "seller.example"] if change == "allowlist" else ["shop"],
+                        auto_approve_threshold="500" if change == "auto_amount" else "50")
+        async def review(call, provenance):
+            await asyncio.sleep(0)
+            update = {"auto_approve_threshold":Decimal("50")} if change == "auto_amount" else {"allowed_payees":["shop"]}
+            firewall.policy = policy.model_copy(update=update)
+            return Verdict(decision="ALLOW", reason="Independent intent review completed")
+        judge = type("Judge", (), {"mode":"rules", "judge":staticmethod(review)})()
+        firewall = Firewall(policy, judge, audit)
+        execute = AsyncMock()
+        approval = AsyncMock(return_value=True)
+        result = await firewall.invoke(
+            ToolCall(tool="create_order", amount="249.99", payee="shop", merchant="seller.example", category="electronics"),
+            Provenance("Buy me headphones under $100"), execute, request_approval=approval)
+        assert result["decision"] == "BLOCK"
+        execute.assert_not_awaited()
+        approval.assert_not_awaited()
+        event = audit.report()["rows"][0]
+        assert event["risk_score"] == (70 if change == "auto_amount" else 60)
+        recheck = event["policy_rechecks"][0]
+        assert recheck["risk_score"] == 90
+        assert sum(factor["points"] for factor in recheck["factors"]) == 90
+        assert event["policy_snapshot"]["auto_approve_threshold"] == ("500" if change == "auto_amount" else "50")
+        assert event["computed_decision"] == "BLOCK" and event["status"] == "blocked"
+        audit.close()
+    asyncio.run(scenario())
+
+
+def test_approved_payment_rechecks_current_risk_without_rewriting_initial_evidence():
+    async def scenario():
+        audit = AuditStore(":memory:")
+        policy = Policy(allowed_payees=["shop"], auto_approve_threshold="500")
+        judge = type("Judge", (), {"mode":"rules", "judge":AsyncMock(return_value=Verdict(decision="ALLOW", reason="Independent review completed"))})()
+        firewall = Firewall(policy, judge, audit)
+        async def approve(*args):
+            await asyncio.sleep(0)
+            firewall.policy = policy.model_copy(update={"auto_approve_threshold":Decimal("50")})
+            return True
+        execute = AsyncMock()
+        result = await firewall.invoke(
+            ToolCall(tool="create_order", amount="249.99", payee="shop", merchant="seller.example", category="electronics"),
+            Provenance("Buy me headphones under $100"), execute, request_approval=approve)
+        assert result["decision"] == "BLOCK" and result["enforced_decision"] == "BLOCK"
+        execute.assert_not_awaited()
+        event = audit.report()["rows"][0]
+        assert event["computed_decision"] == "REQUIRE_APPROVAL" and event["decision"] == "BLOCK"
+        assert event["risk_score"] == 70 and event["policy_snapshot"]["auto_approve_threshold"] == "500"
+        assert next(factor for factor in event["factors"] if factor["name"] == "Automatic amount")["points"] == 0
+        recheck = event["policy_rechecks"][-1]
+        assert recheck["stage"] == "after_approval" and recheck["risk_score"] == 90
+        assert next(factor for factor in recheck["factors"] if factor["name"] == "Automatic amount")["points"] == 20
+        assert [entry["action"] for entry in event["approval_history"]] == ["requested", "approved"]
+        assert audit.reserve_total() == 0
+        judge.judge.assert_awaited_once()
+        audit.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mode", ["Enforce", "Monitor"])
+def test_policy_change_after_skipped_review_requires_explicit_approval_in_enforce(mode):
+    async def scenario():
+        audit = AuditStore(":memory:")
+        policy = Policy(allowed_payees=["shop", "seller.example"])
+        judge = type("Judge", (), {"mode":"rules", "judge":AsyncMock()})()
+        firewall = Firewall(policy, judge, audit)
+        async def observer(event):
+            if event["type"] == "decision":
+                await asyncio.sleep(0)
+                firewall.policy = policy.model_copy(update={"allowed_payees":["shop"]})
+        execute = AsyncMock(return_value={"id":"MOCK-ORDER", "status":"CREATED"})
+        approval = AsyncMock(return_value=False)
+        result = await firewall.invoke(
+            ToolCall(tool="create_order", amount="19.99", payee="shop", merchant="seller.example", category="electronics"),
+            Provenance("Buy me a USB-C charger under $40"), execute, mode=mode, emit=observer, request_approval=approval)
+        event = audit.report()["rows"][0]
+        assert event["risk_score"] == 20 and event["computed_decision"] == "ALLOW"
+        recheck = event["policy_rechecks"][-1]
+        assert recheck["stage"] == "before_provider" and recheck["risk_score"] == 50
+        assert recheck["ai_review"] == "not performed after policy change — human approval required"
+        judge.judge.assert_not_awaited()
+        if mode == "Enforce":
+            assert result["status"] == "denied"
+            approval.assert_awaited_once()
+            execute.assert_not_awaited()
+        else:
+            assert result["id"] == "MOCK-ORDER" and event["status"] == "succeeded"
+            approval.assert_not_awaited()
+            execute.assert_awaited_once()
+        audit.close()
+    asyncio.run(scenario())
+
+
+def test_policy_change_after_initial_decision_publishes_final_tool_rejection():
+    async def scenario():
+        audit = AuditStore(":memory:")
+        policy = Policy(allowed_payees=["shop", "seller.example"])
+        firewall = Firewall(policy, RuleJudge(), audit)
+        events = []
+        async def observer(event):
+            events.append(event)
+            if event["type"] == "decision":
+                await asyncio.sleep(0)
+                firewall.policy = policy.model_copy(update={"allowed_payees":["shop"], "unknown_payee_action":"BLOCK"})
+        execute = AsyncMock()
+        result = await firewall.invoke(
+            ToolCall(tool="create_order", amount="19.99", payee="shop", merchant="seller.example", category="electronics"),
+            Provenance("Buy me a USB-C charger under $40"), execute, emit=observer)
+        assert result["decision"] == "BLOCK"
+        execute.assert_not_awaited()
+        assert events[0]["decision"] == "ALLOW"
+        assert len(events) == 2 and events[-1]["type"] == "tool_result"
+        assert events[-1]["status"] == "blocked" and events[-1]["decision"] == "BLOCK"
+        assert audit.report()["rows"][0]["status"] == "blocked"
+        audit.close()
+    asyncio.run(scenario())

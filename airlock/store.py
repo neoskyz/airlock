@@ -89,9 +89,12 @@ class ApprovalManager:
                 card["status"] = "cancelled"
                 item[0].cancel()
 
-    def resolve(self, identifier, approved):
+    def can_resolve(self, identifier):
         item = self.pending.get(identifier)
-        if not item or item[0].done():
+        return item is not None and not item[0].done()
+
+    def resolve(self, identifier, approved):
+        if not self.can_resolve(identifier):
             return False
-        item[0].set_result(approved)
+        self.pending[identifier][0].set_result(approved)
         return True
