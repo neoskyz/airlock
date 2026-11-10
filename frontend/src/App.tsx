@@ -6,7 +6,7 @@ import { displayText, isRunActive, RUN_UNAVAILABLE } from './runUpdates';
 import type { Approval, AuditRow, Config, Explainable, LiveState, Mode, Policy, Product, Run, TimelineEvent } from './types';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
-const purchase = 'Buy me a USB-C charger under $40';
+const purchase = 'Buy me the cheapest 65W USB-C charger under $40';
 const contractor = "Pay my contractor's $120 invoice";
 const money = (value: string | number | undefined) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value || 0));
 const time = (value: string) => new Date(value).toLocaleTimeString('en-US', { hour12: false });
