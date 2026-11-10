@@ -7,7 +7,6 @@ period: weekly
 auto_approve_threshold: 50
 allowed_payees:
   - shop@chargers.example
-  - marketplace.volt.example
 unknown_payee_action: REQUIRE_APPROVAL
 blocked_categories:
   - gift cards
@@ -21,3 +20,20 @@ enabled:
   allowlist: true
   categories: true
   risk_threshold: true
+# Editable scoring parameters for risk-based approval (policy 5).
+velocity_window_seconds: 60
+velocity_call_threshold: 3
+review_min_score: 30
+risk_weights:
+  unknown_payee: 18
+  unknown_merchant: 50
+  new_payee: 20
+  not_requested: 30
+  negated: 50
+  over_budget: 20
+  above_auto_approve_limit: 20
+  payout_tool: 24
+  velocity: 10
+  unknown_merchant_velocity: 4
+  untrusted_source: 40
+  category: 5

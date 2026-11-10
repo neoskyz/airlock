@@ -1,12 +1,11 @@
 import asyncio
 from collections import OrderedDict
-from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import logging
 from time import perf_counter
 from .models import Decision, Latency, RiskFactor, Verdict, decision_label
-from .judge import normalize_review_evidence
+from .judge import normalize_review_evidence, review_sentence
 from .risk import score_call
 
 
@@ -17,80 +16,11 @@ class Firewall:
     Monitor computes the same verdict and records it while allowing execution.
     """
 
-    def __init__(self, policy, judge, audit, *, review_timeout=4.0):
+    def __init__(self, policy, judge, audit, *, review_timeout=8.0):
         self.policy, self.judge, self.audit = policy, judge, audit
         self.review_timeout = review_timeout
         self._budget_lock = asyncio.Lock()
         self._reviews = OrderedDict()
-        self._explanations = set()
-        self._explanation_epoch = 0
-
-    def cancel_explanations(self):
-        """Invalidate background work before the caller resets its audit ledger."""
-        self._explanation_epoch += 1
-        pending = tuple(self._explanations)
-        for task in pending:
-            task.cancel()
-        return pending
-
-    async def drain_explanations(self):
-        """Wait for queued explanations, useful for SDK shutdown and tests."""
-        while self._explanations:
-            pending = tuple(self._explanations)
-            await asyncio.gather(*pending, return_exceptions=True)
-            # gather on already-finished tasks may not yield for done callbacks.
-            self._explanations.difference_update(pending)
-
-    async def close(self):
-        pending = self.cancel_explanations()
-        await asyncio.gather(*pending, return_exceptions=True)
-        for row in self.audit.report()["rows"]:
-            if (row.get("ai_explanation") or {}).get("status") == "generating":
-                self.audit.update_metadata(row["id"], ai_explanation={"status":"failed", "text":"", "latency_ms":None})
-
-    def _explanation_state(self, verdict):
-        if verdict.decision == Decision.ALLOW:
-            return None
-        if not callable(getattr(self.judge, "explain", None)):
-            status = "skipped_no_model"
-        elif getattr(self.judge, "budget", None) is not None and self.judge.budget.exhausted:
-            status = "skipped_budget"
-        else:
-            status = "generating"
-        return {"status":status, "text":"", "latency_ms":None}
-
-    def _queue_explanation(self, audit_id, call, provenance, verdict, send):
-        epoch = self._explanation_epoch
-        provenance, verdict = deepcopy(provenance), verdict.model_copy(deep=True)
-
-        async def generate():
-            started = perf_counter()
-            try:
-                result = await asyncio.wait_for(self.judge.explain(call, provenance, verdict), timeout=self.review_timeout)
-                if not isinstance(result, dict) or result.get("status") not in {"completed", "skipped_budget"}:
-                    raise ValueError("Invalid explanation result")
-                text = result.get("text", "")
-                if result["status"] == "completed" and (not isinstance(text, str) or not text.strip()):
-                    raise ValueError("Empty explanation")
-                explanation = {"status":result["status"], "text":text if result["status"] == "completed" else "",
-                               "latency_ms":round((perf_counter()-started)*1000, 2) if result["status"] == "completed" else None}
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logging.getLogger(__name__).warning("AI explanation failed: %s", type(exc).__name__)
-                explanation = {"status":"failed", "text":"", "latency_ms":round((perf_counter()-started)*1000, 2)}
-            if epoch != self._explanation_epoch:
-                return
-            try:
-                self.audit.update_metadata(audit_id, ai_explanation=explanation)
-                await send(type="explanation", id=audit_id+":explanation", audit_id=audit_id,
-                           ai_explanation=explanation, message=explanation["text"] or "AI explanation unavailable; rule factors remain available")
-            except Exception as exc:
-                logging.getLogger(__name__).warning("AI explanation update failed: %s", type(exc).__name__)
-
-        task = asyncio.create_task(generate())
-        self._explanations.add(task)
-        task.add_done_callback(self._explanations.discard)
 
     def wrap_tool(self, execute):
         """Wrap an async ``execute(ToolCall, request_id)`` provider adapter.
@@ -113,7 +43,7 @@ class Firewall:
         else:
             verdict = Verdict.model_validate(await asyncio.wait_for(self.judge.judge(call, provenance), timeout=self.review_timeout))
         excerpt, source = normalize_review_evidence(verdict.suspicious_excerpt, verdict.source, provenance)
-        verdict = verdict.model_copy(update={"suspicious_excerpt":excerpt, "source":source})
+        verdict = verdict.model_copy(update={"suspicious_excerpt":excerpt, "source":source, "review_summary":review_sentence(verdict.review_summary or verdict.reason)})
         if verdict.ai_review.startswith("unavailable"):
             return verdict, False
         self._reviews[key] = verdict
@@ -141,7 +71,7 @@ class Firewall:
                     logging.getLogger(__name__).warning("Payment event observer failed: %s", type(exc).__name__)
 
         known_payee = self.audit.has_payee(call.payee)
-        recent_calls = self.audit.recent_count()
+        recent_calls = self.audit.recent_count(policy.velocity_window_seconds)
         score, factors, tainted, excerpt, source = score_call(call, provenance, policy,
             known_payee=known_payee, recent_calls=recent_calls)
         preliminary = policy.evaluate(call, initial_reserved, risk_score=score)
@@ -152,7 +82,7 @@ class Firewall:
             verdict = preliminary
             ai_review = "skipped (high risk)" if preliminary.policy == "risk_threshold" else "skipped (hard policy)"
         else:
-            if 30 <= score <= 84:
+            if policy.review_min_score <= score < policy.risk_block_threshold:
                 review_invoked = True
                 review_started = perf_counter()
                 try:
@@ -167,7 +97,7 @@ class Firewall:
                         delta = max(delta, min(10, max(0, 92-score)))
                     adjusted = max(0, min(100, score+delta))
                     if adjusted != score:
-                        factors.append(RiskFactor(name="Intent review", points=adjusted-score, reason=judgment.reason))
+                        factors.append(RiskFactor(code="intent_review", name="Intent review", points=adjusted-score, reason=judgment.review_summary or "Bounded intent-review adjustment"))
                     score = adjusted
                     if judgment.suspicious_excerpt:
                         excerpt, source = judgment.suspicious_excerpt, judgment.source
@@ -178,52 +108,55 @@ class Firewall:
                     review_failed = True
                     ai_review = "unavailable — approval required (fail-closed)"
                 review_ms = (perf_counter()-review_started)*1000
-            elif score >= 85:
+            elif score >= policy.risk_block_threshold:
                 ai_review = "skipped (high risk)"
             verdict = self.policy.evaluate(call, self.audit.reserve_total(self.policy.period), risk_score=score)
             if review_failed:
                 verdict = Verdict(decision=Decision.REQUIRE_APPROVAL, reason="Intent review unavailable or invalid — fail-closed to human approval", policy="risk_threshold")
             elif judgment and judgment.decision == Decision.BLOCK:
-                verdict = Verdict(decision=Decision.BLOCK, reason=judgment.reason, policy="risk_threshold")
+                verdict = Verdict(decision=Decision.BLOCK, reason=judgment.review_summary, policy="risk_threshold")
             elif judgment and judgment.decision == Decision.REQUIRE_APPROVAL and verdict.decision == Decision.ALLOW:
-                verdict = Verdict(decision=Decision.REQUIRE_APPROVAL, reason=judgment.reason, policy="risk_threshold")
+                verdict = Verdict(decision=Decision.REQUIRE_APPROVAL, reason=judgment.review_summary, policy="risk_threshold")
             elif judgment:
-                verdict.reason += "; " + judgment.reason
+                verdict.reason += "; " + judgment.review_summary
         verdict = verdict.model_copy(update={"risk_score":score,"factors":factors,"suspicious_excerpt":excerpt,"source":source,
-            "mode":mode,"ai_review":ai_review,"latency":Latency(rules_ms=round(rules_ms,2),ai_review_ms=round(review_ms,2),total_ms=round((perf_counter()-started)*1000,2))})
+            "mode":mode,"ai_review":ai_review,"review_summary":judgment.review_summary if judgment else "","latency":Latency(rules_ms=round(rules_ms,2),ai_review_ms=round(review_ms,2),total_ms=round((perf_counter()-started)*1000,2))})
         def apply_hard_block(hard):
             # Budget remains a hard constraint. For tool-origin attacks, retain
             # their security explanation first so a full ledger cannot hide it.
             reason = hard.reason
             if tainted and hard.decision == Decision.BLOCK:
                 security = ["Provenance taint: payment instruction exists only in untrusted tool output"]
-                if any(f.name == "Payee history" and "Unknown payee" in f.reason for f in factors):
+                if any(f.code == "unknown_payee" and "Unknown payee" in f.reason for f in factors):
                     security.append("Unknown payee outside the allowlist")
                 security.append("Payout not requested by user" if call.tool == "create_payout" else "Payment amount not requested by user")
                 security.append(f"Risk score {score}")
                 reason = "; ".join([*security, reason])
                 if hard.policy == "period_budget" and not any(f.name == "Period budget" for f in factors):
-                    factors.append(RiskFactor(name="Period budget", points=0, reason=hard.reason))
+                    factors.append(RiskFactor(code="period_budget", policy_id="period_budget", parameter="daily_limit", name="Period budget", points=0, reason=hard.reason))
             return verdict.model_copy(update={"decision":hard.decision, "reason":reason, "policy":hard.policy, "factors":factors})
+
+        audit_id = None
 
         def assess_current_policy(reserved, stage):
             # Keep the initial risk factors immutable. A policy edit changes
             # execution eligibility, with its own score and evidence snapshot.
             current = self.policy.model_copy(deep=True)
             current_score, current_factors, current_taint, _, _ = score_call(
-                call, provenance, current, known_payee=known_payee, recent_calls=recent_calls)
-            needs_review = 30 <= current_score <= 84 and not review_invoked
+                call, provenance, current, known_payee=known_payee,
+                recent_calls=self.audit.recent_count(current.velocity_window_seconds, exclude_id=audit_id))
+            needs_review = current.review_min_score <= current_score < current.risk_block_threshold and not review_invoked
             if judgment and not review_failed:
                 delta = judgment.score_adjustment
                 if judgment.decision == Decision.BLOCK:
                     delta = max(delta, min(10, max(0, 92-current_score)))
                 adjusted = max(0, min(100, current_score+delta))
                 if adjusted != current_score:
-                    current_factors.append(RiskFactor(name="Intent review", points=adjusted-current_score, reason=judgment.reason))
+                    current_factors.append(RiskFactor(code="intent_review", name="Intent review", points=adjusted-current_score, reason=judgment.review_summary or "Bounded intent-review adjustment"))
                 current_score = adjusted
             final = current.evaluate(call, reserved, risk_score=current_score)
             if final.policy == "risk_threshold" and judgment and not review_failed and judgment.decision == Decision.BLOCK:
-                final = Verdict(decision=Decision.BLOCK, reason=judgment.reason, policy="risk_threshold")
+                final = Verdict(decision=Decision.BLOCK, reason=judgment.review_summary, policy="risk_threshold")
             # Hard constraints and a conclusive rule BLOCK always win.
             if final.decision != Decision.BLOCK:
                 if review_failed or needs_review:
@@ -231,9 +164,9 @@ class Firewall:
                               "Policy changed; intent review was not performed for the current risk — human approval required")
                     final = Verdict(decision=Decision.REQUIRE_APPROVAL, reason=reason, policy="risk_threshold")
                 elif judgment and judgment.decision == Decision.REQUIRE_APPROVAL:
-                    final = Verdict(decision=Decision.REQUIRE_APPROVAL, reason=judgment.reason, policy="risk_threshold")
+                    final = Verdict(decision=Decision.REQUIRE_APPROVAL, reason=judgment.review_summary, policy="risk_threshold")
             if judgment and not review_failed and final.decision == Decision.ALLOW:
-                final.reason += "; " + judgment.reason
+                final.reason += "; " + judgment.review_summary
             evidence = {
                 "stage":stage, "decision":final.decision.value, "policy_snapshot":current.model_dump(mode="json"),
                 "risk_score":current_score, "factors":[factor.model_dump(mode="json") for factor in current_factors],
@@ -262,13 +195,12 @@ class Firewall:
                 "ai_review_detail":{"invoked":review_invoked, "model_invoked":review_invoked and reviewer == "AI" and not cached,
                     "reviewer":reviewer, "cached":cached, "status":"unavailable" if review_failed else "cached" if cached else "completed" if review_invoked else "skipped",
                     "decision":judgment.decision.value if judgment else None,
+                    "summary":judgment.review_summary if judgment else "",
                     "reason":judgment.reason if judgment else "Intent review unavailable or invalid — fail-closed to human approval" if review_failed else ai_review,
                     "suspicious_excerpt":judgment.suspicious_excerpt if judgment else "", "source":judgment.source if judgment else "", "latency_ms":round(review_ms,2)},
             }
             if self.policy.model_dump(mode="json") != evidence["policy_snapshot"] or reserved != initial_reserved:
                 evidence["policy_rechecks"] = [current_evidence]
-            explanation = self._explanation_state(verdict)
-            evidence["ai_explanation"] = explanation
             audit_id = self.audit.insert(call, verdict, run_id, enforce, mock, provenance.serialize(), status, evidence=evidence)
             decision_ms = round((perf_counter()-started)*1000, 2)
             verdict = verdict.model_copy(update={"latency":verdict.latency.model_copy(update={"decision_ms":decision_ms, "total_ms":decision_ms})})
@@ -279,7 +211,7 @@ class Firewall:
         details = {"tool":call.tool,"amount":float(call.amount),"payee":call.payee,"mock":mock}
         try:
             await send(type="decision",id=audit_id,message=verdict.reason,**verdict.model_dump(mode="json"),status=status,
-                computed_decision=outcome["computed_decision"],enforced_decision=outcome["enforced_decision"],display_decision=outcome["display_decision"],ai_explanation=explanation,**details)
+                computed_decision=outcome["computed_decision"],enforced_decision=outcome["enforced_decision"],display_decision=outcome["display_decision"],**details)
         except asyncio.CancelledError:
             # The provider has not been called. Release its reservation even
             # when cancellation arrives while publishing the first decision.
@@ -287,8 +219,6 @@ class Firewall:
                 self.audit.update(audit_id, status="cancelled", decision="BLOCK", reason="Payment cancelled before provider execution")
             self.audit.update_metadata(audit_id, latency={**verdict.latency.model_dump(), "end_to_end_ms":round((perf_counter()-started)*1000,2)})
             raise
-        if explanation and explanation["status"] == "generating":
-            self._queue_explanation(audit_id, call, provenance, verdict, send)
         late_block = False
         if verdict.decision != Decision.BLOCK and self.policy.model_dump(mode="json") != current_evidence["policy_snapshot"]:
             async with self._budget_lock:
@@ -303,17 +233,6 @@ class Firewall:
                         late_block = status == "blocked"
                         self.audit.update(audit_id, status=status, decision=verdict.decision.value, reason=verdict.reason)
                         outcome.update(enforced_decision=verdict.decision.value, display_decision=decision_label(verdict.decision, mode))
-        if explanation is None and verdict.decision != Decision.ALLOW:
-            explanation = self._explanation_state(verdict)
-            self.audit.update_metadata(audit_id, ai_explanation=explanation)
-            if explanation and explanation["status"] == "generating":
-                # The initial audit snapshot remains immutable. Explain the
-                # later policy decision with the matching recheck factors.
-                explanation_verdict = verdict.model_copy(update={
-                    "risk_score":current_evidence["risk_score"],
-                    "factors":[RiskFactor.model_validate(factor) for factor in current_evidence["factors"]],
-                })
-                self._queue_explanation(audit_id, call, provenance, explanation_verdict, send)
         if enforce and verdict.decision == Decision.BLOCK:
             self.audit.update_metadata(audit_id, latency={**verdict.latency.model_dump(), "end_to_end_ms":round((perf_counter()-started)*1000,2)})
             if late_block:

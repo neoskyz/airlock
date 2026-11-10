@@ -52,6 +52,9 @@ class Source(BaseModel):
 
 
 class RiskFactor(BaseModel):
+    code: str = "legacy"
+    policy_id: str = "risk_threshold"
+    parameter: str = ""
     name: str
     points: int
     reason: str
@@ -74,6 +77,7 @@ class Verdict(BaseModel):
     factors: list[RiskFactor] = Field(default_factory=list)
     latency: Latency = Field(default_factory=Latency)
     ai_review: str = "skipped (low risk)"
+    review_summary: str = ""
     policy: str = "risk_threshold"
     mode: Literal["Monitor", "Enforce"] = "Enforce"
     score_adjustment: int = Field(default=0, ge=-10, le=10)

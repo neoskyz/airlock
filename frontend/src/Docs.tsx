@@ -38,7 +38,7 @@ function CodeBlock({
 }
 const setup = `import os\nfrom firewall import AuditStore, Firewall, Policy, Provenance, ToolCall, build_judge\nfrom airlock.paypal import build_paypal\n\npaypal = build_paypal(os.getenv("PAYPAL_CLIENT_ID"), os.getenv("PAYPAL_CLIENT_SECRET"))\ncall = ToolCall(tool="create_order", amount="29.00", payee="shop@chargers.example", description="USB-C charger", category="electronics")\nprovenance = Provenance("Buy me a USB-C charger under $40")\nintent_judge = build_judge(api_key=None)  # Explicit rules fallback`;
 const quickstart = `guard = Firewall(Policy.load("policies/default.yaml"), intent_judge, AuditStore("audit.sqlite3"))\nprotected_paypal = guard.wrap_tool(paypal.execute)\nresult = await protected_paypal(call, provenance, mock=paypal.mock)`;
-const policyYaml = `currency: USD\nsingle_transaction_limit: 1000\ndaily_limit: 2000\nperiod: weekly\nallowed_payees:\n  - shop@chargers.example\n  - marketplace.volt.example\nunknown_payee_action: REQUIRE_APPROVAL\nblocked_categories: [gift_cards, crypto, gambling]\nauto_approve_threshold: 50\nrisk_approval_threshold: 60\nrisk_block_threshold: 85\nenabled:\n  single_transaction: true\n  period_budget: true\n  allowlist: true\n  categories: true\n  risk_threshold: true`;
+const policyYaml = `currency: USD\nsingle_transaction_limit: 1000\ndaily_limit: 2000\nperiod: weekly\nauto_approve_threshold: 50\nallowed_payees:\n  - shop@chargers.example\nunknown_payee_action: REQUIRE_APPROVAL\nblocked_categories:\n  - gift cards\n  - crypto\n  - gambling\nrisk_approval_threshold: 60\nrisk_block_threshold: 85\nenabled:\n  single_transaction: true\n  period_budget: true\n  allowlist: true\n  categories: true\n  risk_threshold: true\nvelocity_window_seconds: 60\nvelocity_call_threshold: 3\nreview_min_score: 30\nrisk_weights:\n  unknown_payee: 18\n  unknown_merchant: 50\n  new_payee: 20\n  not_requested: 30\n  negated: 50\n  over_budget: 20\n  above_auto_approve_limit: 20\n  payout_tool: 24\n  velocity: 10\n  unknown_merchant_velocity: 4\n  untrusted_source: 40\n  category: 5`;
 const docSections = [{
   id: 'quickstart',
   name: 'Quickstart'
@@ -95,34 +95,34 @@ export function Docs() {
             <Icon name="docs" size={19} />
             <p><code>build_paypal</code> is this application's sandbox adapter. Its order executor calls the real PayPal Agent Toolkit <code>create_order</code> handler; payouts use REST. An external host supplies its own <code>async execute(ToolCall, request_id)</code> adapter.</p>
           </div>
-          <p>Pass <code>request_approval=your_async_callback</code> when human approval is supported. Without a callback, approval-required calls are denied. Await <code>guard.drain_explanations()</code> to finish pending explanations, or <code>guard.close()</code> to cancel them, before closing the payment adapter and audit store during application shutdown. Missing credentials select the explicit MOCK adapter. This example uses the rules fallback; provide your independent review key to enable AI intent review.</p>
+          <p>Pass <code>request_approval=your_async_callback</code> when human approval is supported. Without a callback, approval-required calls are denied. Missing credentials select the explicit MOCK adapter. This example uses the rules fallback; provide your independent review key to enable AI intent review.</p>
         </section>
         <section id="decisions">
           <span className="eyebrow">DECISION PIPELINE</span>
           <h2>How decisions work</h2>
-          <p>Rules make clear low-risk and high-risk decisions immediately. Only gray-zone calls wait for AI intent review. Flagged decisions can receive a supplementary AI explanation afterward.</p>
+          <p>Rules make clear low-risk and high-risk decisions immediately. Only gray-zone calls wait for AI intent review. Every decision immediately shows rule factors and original source evidence.</p>
           <div className="decision-flow">
-            {['Fast decision', 'Gray-zone review', 'Async explanation'].map((name, index) => <div key={name}>
+            {['Fast decision', 'Gray-zone review', 'Structured evidence'].map((name, index) => <div key={name}>
               <span>0{index + 1}</span>
               <strong>
                 {name}
               </strong>
               <p>
-                {['Rules allow or block immediately', 'Only scores 30–84 wait for AI', 'Supplement after the decision'][index]}
+                {['Rules allow or block immediately', 'Only scores 30–84 wait for AI', 'Rule title, factors, source excerpts'][index]}
               </p>
             </div>)}
           </div>
           <h3>Fast path</h3>
-          <p>Recipient trust, amount against the user's budget, amount against the automatic approval reference, payout versus purchase, velocity, provenance taint, and category contribute visible points. Scores below 30 allow immediately; scores of 85 or above and hard policy violations block immediately. These decisions make no synchronous model call. Taint adds risk points; it does not independently trigger review.</p>
+          <p>Recipient trust, amount against the user's budget, amount against the auto-approve limit, payout versus purchase, velocity, provenance taint, and category contribute visible points. Scores below 30 allow immediately; scores of 85 or above and hard policy violations block immediately. These decisions make no model call. Taint adds risk points; it does not independently trigger review.</p>
           <h3>Selective intent review</h3>
           <p>Only scores from 30 to 84 trigger synchronous intent review. Reviews raise or lower risk within bounds, and identical reviews are cached within a run. Headphone purchases from an unknown merchant retain an approval score of 60–84. Most clear transactions avoid model latency and cost; the $500 injected payout is blocked by rules, while the $19.99 charger is allowed by rules.</p>
           <div className="docs-callout">
             <strong>Fail closed on review timeout</strong>
             <p>Review errors, invalid responses, and a four-second timeout require human approval. The payment stays paused in Enforce until approved or denied.</p>
           </div>
-          <h3>AI explanation · asynchronous</h3>
-          <p>After a BLOCK or REQUIRE_APPROVAL decision is recorded, a background model call can add a natural-language explanation. It cannot change the decision, risk score, or payment result. Rule factors remain available while the explanation generates or if it fails. Explanations share the daily LLM budget with agents and intent reviews; when the budget is exhausted or no review model is configured, only the rule factors are shown.</p>
-          <p>The console separates decision latency from explanation time. Median decision latency measures recorded decision samples; AI-reviewed decisions measures actual synchronous model attempts, including failed attempts and excluding cached reviews, rules fallback, and asynchronous explanations. Older events without these measurements are excluded.</p>
+          <h3>Structured decision evidence</h3>
+          <p>The live feed displays a rule-template title based on the strongest risk factor, point chips with stable reason codes, highlighted original source evidence, and decision latency. A synchronous AI review adds one sentence of at most 20 English words. Complete review rationale is available in event details, collapsed by default. There is no background explanation call.</p>
+          <p>Median decision latency measures recorded decision samples; AI-reviewed decisions measures actual synchronous model attempts, including failed attempts and excluding cached reviews and rules fallback. Older events without these measurements are excluded. Flagged events can be filtered by reason code.</p>
           <h3>Monitor and Enforce</h3>
           <p><strong>Monitor</strong> computes and records decisions while allowing tool execution. <strong>Enforce</strong> blocks rejected calls and pauses requests requiring approval. Every call retains the mode used for evaluation.</p>
         </section>
@@ -156,22 +156,23 @@ export function Docs() {
                   <td>Block restricted categories from catalog metadata.</td>
                 </tr>
                 <tr>
-                  <td>Risk score thresholds</td>
-                  <td>Require approval at 60; block at 85 by default.</td>
+                  <td>Risk-based approval</td>
+                  <td>Auto-approve limit, review floor, scoring weights, velocity settings, and approval/block score thresholds.</td>
                 </tr>
               </tbody>
             </table>
           </div>
           <CodeBlock code={policyYaml} language="yaml" />
-          <p><code>auto_approve_threshold</code> is the amount risk reference used by scoring. The fifth policy applies the final score thresholds. Each of the five controls has an enabled switch.</p>
+          <p>The fifth policy includes <strong>Auto-approve limit</strong> (<code>auto_approve_threshold</code>, default $50), every factor weight, the review floor, and velocity count/window. Factor parameter links open the corresponding control in Policies. Each of the five policies has an enabled switch, and edits are audited.</p>
+          <p>The allowlist uses named recipient rows with validated email or domain addresses, individual removal, and an optional hard-block toggle. The simulated Volt seller is outside the default allowlist: its small, budget-aligned charger order still allows by rules. Higher-value unknown-merchant headphones retain an approval score of 60–84.</p>
         </section>
         <section id="audit">
           <span className="eyebrow">AUDIT & INTEGRATIONS</span>
           <h2>Review every decision</h2>
           <p>SQLite records payment tools, amounts, recipients, decisions, risk factors, provenance, stage latency, approval results, and PayPal IDs and statuses. Mode and policy changes are audited.</p>
-          <CodeBlock code={'curl http://localhost:8000/api/audit\ncurl -N "http://localhost:8000/api/events?audience=console"'} language="shell" />
+          <CodeBlock code={'curl http://localhost:8000/api/audit\ncurl "http://localhost:8000/api/audit/flagged?reason_code=untrusted_source"\ncurl -N "http://localhost:8000/api/events?audience=console"'} language="shell" />
           <h3>Live state over SSE</h3>
-          <p>The client and console subscribe to backend state. The client receives tool results; risk evidence stays in the console projection. Approvals are single use. Cancelling a task does not reverse a submitted payment.</p>
+          <p>Checkout displays a neutral Waiting for approval state with the amount, recipient, Review in Airlock link, and Stop task. Start stays disabled while the request waits. After approval, the step shows Approved · Order created. The client and console subscribe to backend state. The client receives tool results; risk evidence stays in the console projection. Approvals are single use. Cancelling a task does not reverse a submitted payment.</p>
           <div className="docs-note">
             <Icon name="docs" size={19} />
             <p>Webhooks are not implemented. Use the audit API and server-sent events. This release runs in one process; durable audit retention requires a persistent disk.</p>
@@ -210,7 +211,7 @@ export function Docs() {
           <h3>Scope</h3>
           <p>This is a single-workspace sandbox demonstration without authentication or multi-tenancy. It illustrates the payment execution boundary, not a production authorization service.</p>
         </section>
-        <footer className="docs-footer">Airlock · agentic payment firewall<a href="/console">Return to console<Icon name="arrow" size={15} /></a></footer>
+        <footer className="docs-footer"><span>Deployed on Render · Audit log powered by AG Grid · Product data from Channel3</span><a href="/console">Return to console<Icon name="arrow" size={15} /></a></footer>
       </main>
       <aside className="docs-toc">
         <span>ON THIS PAGE</span>

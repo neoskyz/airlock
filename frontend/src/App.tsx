@@ -4,15 +4,16 @@ import { ClientActivity } from './ClientActivity';
 import { VoltStore } from './VoltStore';
 import { EventDetail } from './EventDetail';
 import { FlaggedEvents } from './FlaggedEvents';
-import { ConsoleLink, eventMoney, eventPath, navigateConsole } from './consoleNavigation';
-import { approvalHref, conflictRun, displayText, isRunActive, isRunBlocking, reconcileRuns, RUN_UNAVAILABLE } from './runUpdates';
+import { ConsoleLink, eventMoney, eventPath, navigateConsole, policyParameterPath } from './consoleNavigation';
+import { conflictRun, displayText, isRunActive, isRunBlocking, reconcileRuns, RUN_UNAVAILABLE } from './runUpdates';
 import type { Approval, AuditRow, Explainable, Mode, Run } from './types';
 import { useLive } from './useLive';
 import { Icon, Badge, Connection, ErrorBanner, type IconName } from './ui';
 import { Policies } from './Policies';
 import { Docs } from './Docs';
 import { AuditLogBoundary } from './AuditLogBoundary';
-import { AIExplanationPanel, DecisionLatency, DecisionMetrics } from './DecisionEvidence';
+import { AIReviewSummary, DecisionLatency, DecisionMetrics, VelocityParameterLinks } from './DecisionEvidence';
+import { decisionTitle, reasonNames } from './decisionPresentation';
 const AuditLog = lazy(() => import('./AuditLog'));
 const purchase = 'Buy me the cheapest 65W USB-C charger under $40';
 const headphones = 'Buy me noise-cancelling headphones under $300';
@@ -50,6 +51,7 @@ export function Client() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [responseRun, setResponseRun] = useState<Run | null>(null);
+  const [conflict, setConflict] = useState('');
   const actionInFlight = useRef(false);
   const runs = reconcileRuns(liveRuns, responseRun);
   useEffect(() => {
@@ -84,10 +86,15 @@ export function Client() {
   }, [selected, liveRuns, connection]);
   async function start(event: React.FormEvent) {
     event.preventDefault();
-    if (!input.trim() || active || actionInFlight.current || connection !== 'live') return;
+    if (active) {
+      if (runningRun?.status === 'awaiting_approval') setConflict('This task is waiting for approval. Review it in Airlock or stop the task before starting another.');
+      return;
+    }
+    if (!input.trim() || actionInFlight.current || connection !== 'live') return;
     actionInFlight.current = true;
     setBusy(true);
     setError('');
+    setConflict('');
     try {
       const result = await request<{ id: string; run?: Run }>('/api/runs', {
         method: 'POST',
@@ -105,8 +112,8 @@ export function Client() {
         setResponseRun(previous);
         setSelected(previous.id);
         rememberSelectedRun(previous.id);
-      }
-      setError((err as Error).message);
+        setConflict(previous.status === 'awaiting_approval' ? 'This task is waiting for approval. Review it in Airlock or stop the task before starting another.' : (err as Error).message);
+      } else setError((err as Error).message);
     } finally {
       actionInFlight.current = false;
       setBusy(false);
@@ -117,6 +124,7 @@ export function Client() {
     actionInFlight.current = true;
     setBusy(true);
     setError('');
+    setConflict('');
     try {
       const stopped = await request<Run>(`/api/runs/${runningRun.id}/cancel?audience=client`, {
         method: 'POST',
@@ -171,17 +179,15 @@ export function Client() {
         <p>Find products and send payments through your agent.</p>
       </div>
       <ErrorBanner message={error || liveError} onClose={error ? () => setError('') : undefined} />
-      {runningRun && <div className="connection-notice task-status-notice" role="status">
-        <strong>Task {runningRun.id.slice(0, 8)} · {runningRun.status.replaceAll('_', ' ')}</strong>
-        <span>{runningRun.blocking ? 'This task is still finishing on the server. Stop it before starting another task.' : runningRun.status === 'awaiting_approval' ? 'This task is waiting for payment approval in the Airlock console. Review the request or stop this task to continue.' : runningRun.status === 'cancelling' ? 'This task is stopping. Wait for the current request to finish, or retry Stop.' : 'The agent is still working. You can stop this task before starting another.'}</span>
-        {runningRun.status === 'awaiting_approval' && <a className="button secondary" href={approvalHref(runningRun)} target="_blank" rel="noopener noreferrer">Review approval<Icon name="external" size={14} /></a>}
-      </div>}
       <form className="task-composer" onSubmit={start}>
         <label htmlFor="task">Task</label>
         <div className="task-input-row">
           <input id="task" value={input} onChange={event => setInput(event.target.value)} placeholder="Describe a purchase or payment…" disabled={active} maxLength={4000} />
-          {active ? <button type="button" className="button stop" onClick={() => void stop()} disabled={busy || !runningRun}><Icon name="stop" size={17} />Stop</button> : <button className="button primary" disabled={!input.trim() || connection !== 'live'}>Start<Icon name="arrow" size={18} /></button>}
+          <button className="button primary" disabled={active || !input.trim() || connection !== 'live'}>Start<Icon name="arrow" size={18} /></button>
+          {active && runningRun?.status !== 'awaiting_approval' && <button type="button" className="button stop" onClick={() => void stop()} disabled={busy || !runningRun}><Icon name="stop" size={17} />Stop</button>}
         </div>
+        {runningRun && <span className="task-running-note">{runningRun.status === 'awaiting_approval' ? 'Waiting for approval. The agent will continue once approved.' : runningRun.blocking ? 'This task is still finishing on the server. Stop it before starting another task.' : runningRun.status === 'cancelling' ? 'The task is stopping. Wait for it to finish, or retry Stop.' : 'The agent is working on your task.'}</span>}
+        {conflict && runningRun?.status === 'awaiting_approval' && <p className="task-conflict-note" role="status">{conflict}</p>}
       </form>
       <div className="prompt-examples">
         <span>Examples</span>
@@ -213,7 +219,7 @@ export function Client() {
               {run.messages?.find(item => item.role === 'user')?.content || input}
             </p>
           </div>
-          <ClientActivity run={run} />
+          <ClientActivity run={run} onStop={() => void stop()} stopDisabled={busy || !runningRun} />
         </> : <div className="activity-empty">
           <div className="empty-circles">
             <Icon name="search" />
@@ -227,8 +233,7 @@ export function Client() {
         </div>}
       </section>
       <footer className="client-footer">
-        <span>PayPal sandbox{config.paypal_mode === 'MOCK' ? ' · MOCK payment adapter' : ''}</span>
-        <span>Sandbox balance is tracked locally from submitted requests.</span>
+        <span>Deployed on Render · Audit log powered by AG Grid · Product data from Channel3</span>
         <a href="/console" target="_blank" rel="noreferrer">Open security console<Icon name="external" size={13} /></a>
       </footer>
     </main>
@@ -268,9 +273,7 @@ function Factors({
         <span>
           {factor.name.replaceAll('_', ' ')}
         </span>
-        <p>
-          {neutral(factor.reason)}
-        </p>
+        <p><ConsoleLink href={policyParameterPath(factor.parameter, factor.policy_id)} title="Configure this risk parameter">{neutral(factor.reason)}</ConsoleLink><VelocityParameterLinks code={factor.code} /></p>
       </div>
       <strong className={factor.points > 0 ? 'positive' : ''}>
         {factor.points > 0 ? '+' : ''}
@@ -301,17 +304,9 @@ function ExecutionStatus({
     </>}
   </div>;
 }
-function FeedCard({
-  row,
-  selected,
-  onToggle
-}: {
-  row: AuditRow;
-  selected: boolean;
-  onToggle: () => void;
-}) {
+export function FeedCard({ row }: { row: AuditRow }) {
   return <article className={`feed-card ${row.decision.toLowerCase()} ${row.mode === 'Monitor' ? 'monitor' : ''}`}>
-    <button className="feed-card-summary" onClick={onToggle} aria-expanded={selected}>
+    <div className="feed-card-summary">
       <span className="feed-tool-icon">
         <Icon name={row.tool === 'create_order' ? 'bag' : 'arrow'} size={19} />
       </span>
@@ -336,71 +331,16 @@ function FeedCard({
         <span>Risk score</span>
         <RiskScore value={row.risk_score} />
       </div>
-      <span className="expand-chevron">
-        {selected ? '⌃' : '⌄'}
-      </span>
-    </button>
+    </div>
     <div className="feed-card-context">
-      <span>
-        {neutral(row.reason)}
-      </span>
+      <strong className="decision-title">{decisionTitle(row)}</strong>
+      <div className="risk-chips">{(row.factors || []).filter(factor => factor.points > 0).map((factor, index) => <ConsoleLink key={`${factor.code || factor.name}-${index}`} className="risk-chip" href={policyParameterPath(factor.parameter, factor.policy_id)} title={factor.reason}>{reasonNames[factor.code || ''] || factor.name} +{factor.points}</ConsoleLink>)}</div>
+      {row.suspicious_excerpt && <div className="provenance-evidence"><span className="evidence-origin">{row.source || 'Untrusted product page'}</span><mark>{row.suspicious_excerpt}</mark></div>}
+      <AIReviewSummary row={row} />
       <DecisionLatency row={row} />
-      {['BLOCK', 'REQUIRE_APPROVAL'].includes(row.computed_decision || row.decision) && <p className="feed-rule-reasons">Rules: {(row.factors || []).filter(factor => factor.points > 0).map(factor => neutral(factor.reason)).join(' · ') || neutral(row.reason)}</p>}
-      <AIExplanationPanel row={row} />
       <ExecutionStatus row={row} />
       <ConsoleLink className="event-link" href={eventPath(row.id)}>View event details →</ConsoleLink>
     </div>
-    {selected && <div className="feed-details">
-      <div className="risk-breakdown">
-        <div className="detail-heading">Risk factors<span>Points</span></div>
-        <Factors item={row} />
-        <div className="policy-fired">
-          <span>Policy</span>
-          <strong>
-            {row.policy?.replaceAll('_', ' ') || 'Risk score threshold'}
-          </strong>
-        </div>
-      </div>
-      <div className="evidence-panel">
-        <div className="detail-heading">Provenance & execution</div>
-        {row.suspicious_excerpt ? <div className="provenance-evidence">
-          <span className="evidence-origin">Untrusted tool output · {row.source || 'merchant product page'}</span>
-          <mark>
-            {row.suspicious_excerpt}
-          </mark>
-        </div> : <div className="no-taint">
-          <Icon name="check" size={16} />
-          <span>No suspicious excerpt identified</span>
-        </div>}
-        <div className="execution-fields">
-          <div>
-            <span>Execution</span>
-            <strong>
-              {row.status.replaceAll('_', ' ')}
-            </strong>
-          </div>
-          <div>
-            <span>PayPal status</span>
-            <strong>
-              {row.paypal_status || (['unknown', 'executing'].includes(row.status) ? 'Not confirmed' : 'No request submitted')}
-            </strong>
-          </div>
-          <div>
-            <span>PayPal ID</span>
-            <code>
-              {row.paypal_id || '—'}
-              {row.mock && row.paypal_id ? ' · MOCK' : ''}
-            </code>
-          </div>
-          <div>
-            <span>Mode at evaluation</span>
-            <strong>
-              {row.mode || (row.firewall_enabled ? 'Enforce' : 'Monitor')}
-            </strong>
-          </div>
-        </div>
-      </div>
-    </div>}
   </article>;
 }
 function ApprovalInbox({
@@ -544,7 +484,6 @@ export function Console() {
   const [resetBusy, setResetBusy] = useState(false);
   const [resetMessage, setResetMessage] = useState('');
   const [answering, setAnswering] = useState('');
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [selectedApproval, setSelectedApproval] = useState(() => new URLSearchParams(location.search).get('approval') || '');
   const [dismissed, setDismissed] = useState<string[]>([]);
   const approvals = runs.flatMap(run => (run.approvals || []).filter((approval): approval is Approval => 'tool' in approval).map(approval => ({
@@ -562,7 +501,6 @@ export function Console() {
   const canReset = connection === 'live' && !runs.some(run => isRunActive(run.status)) && !answering;
   useEffect(() => {
     if (!runs.length && !audit.rows.length) {
-      setExpanded({});
       if (!new URLSearchParams(location.search).has('approval')) setSelectedApproval('');
       setDismissed([]);
     }
@@ -603,7 +541,6 @@ export function Console() {
         }),
         signal: AbortSignal.timeout(15000)
       });
-      setExpanded({});
       setSelectedApproval('');
       setDismissed([]);
       setResetMessage('Sandbox data reset. Local budget usage and wallet ledger are clear.');
@@ -769,10 +706,7 @@ export function Console() {
             </span>
           </div>
           <div className="feed-list">
-            {feedRows.length ? feedRows.map((row, index) => <FeedCard row={row} key={row.id} selected={expanded[row.id] ?? index === 0} onToggle={() => setExpanded(current => ({
-              ...current,
-              [row.id]: !(current[row.id] ?? index === 0)
-            }))} />) : <div className="empty-panel">
+            {feedRows.length ? feedRows.map(row => <FeedCard row={row} key={row.id} />) : <div className="empty-panel">
               <span className="empty-symbol">
                 <Icon name="feed" size={29} />
               </span>
@@ -795,14 +729,7 @@ export function Console() {
         {tab === 'flagged' && <FlaggedEvents revision={auditRevision} />}
         {tab === 'event' && <EventDetail key={eventId} id={eventId} revision={auditRevision} />}
       </main>
-      <footer className="console-footer">
-        <span className={`render-badge ${config.deployed_on_render ? 'deployed' : ''}`}>
-          <span className="render-symbol">▰</span>
-          {config.deployed_on_render ? 'Deployed on Render' : 'Render · local workspace'}
-        </span>
-        <span><i />PayPal sandbox · {config.paypal_mode === 'MOCK' ? 'MOCK adapter' : 'Sandbox adapter'}</span>
-        <span className="footer-version">Airlock v{config.version || '0.2.0'}</span>
-      </footer>
+      <footer className="console-footer">Deployed on Render · Audit log powered by AG Grid · Product data from Channel3</footer>
     </div>
     {pendingNotification && <div className="push-notification" role="status">
       <div className="push-app">

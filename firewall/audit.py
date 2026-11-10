@@ -33,12 +33,6 @@ class AuditStore:
             self.record_approval(row["id"], "cancelled", actor="System (server restart)")
         self.connection.execute("UPDATE audit SET decision='BLOCK', status='cancelled', reason=reason || '; server restarted before approval' WHERE status='awaiting_approval'")
         self.connection.execute("UPDATE audit SET status='unknown' WHERE status='executing'")
-        # Explanation tasks are process-local; a restart cannot resume them.
-        for row in self.connection.execute("SELECT id, metadata FROM audit").fetchall():
-            metadata = json.loads(row["metadata"])
-            explanation = metadata.get("ai_explanation")
-            if isinstance(explanation, dict) and explanation.get("status") == "generating":
-                self.update_metadata(row["id"], ai_explanation={**explanation, "status":"failed", "text":""})
         self.connection.commit()
 
     def reserve_total(self, period="daily") -> Decimal:
@@ -50,9 +44,9 @@ class AuditStore:
     def has_payee(self, payee):
         return self.connection.execute("SELECT 1 FROM audit WHERE lower(payee)=lower(?) AND status='succeeded' LIMIT 1", (payee,)).fetchone() is not None
 
-    def recent_count(self, seconds=60):
+    def recent_count(self, seconds=60, *, exclude_id=None):
         cutoff = (datetime.now(timezone.utc)-timedelta(seconds=seconds)).isoformat()
-        return self.connection.execute("SELECT COUNT(*) FROM audit WHERE timestamp>=? AND amount_cents>0", (cutoff,)).fetchone()[0]
+        return self.connection.execute("SELECT COUNT(*) FROM audit WHERE timestamp>=? AND amount_cents>0 AND (? IS NULL OR id<>?)", (cutoff, exclude_id, exclude_id)).fetchone()[0]
 
     def insert(self, call: ToolCall, verdict: Verdict, run_id: str, enabled: bool, mock: bool, provenance: list, status: str, *, evidence=None):
         identifier = uuid4().hex
@@ -108,12 +102,13 @@ class AuditStore:
     def _serialize(stored):
         row = dict(stored)
         metadata = json.loads(row.pop("metadata"))
+        metadata.pop("ai_explanation", None)  # Retired metadata is never projected to API/SSE.
         row.update({key:value for key,value in metadata.items() if key not in row})
         row["initial_reason"] = metadata.get("reason")
         defaults = {"risk_score":None, "factors":[], "latency":None,
             "ai_review":"not recorded", "policy":"", "mode":"Enforce" if row["firewall_enabled"] else "Monitor",
             "computed_decision":row["decision"], "category":"", "description":None, "product_id":"",
-            "call":None, "policy_snapshot":None, "ai_review_detail":None, "ai_explanation":None, "approval_history":[], "execution_result":None}
+            "call":None, "policy_snapshot":None, "ai_review_detail":None, "approval_history":[], "execution_result":None}
         for key, default in defaults.items():
             row.setdefault(key, default)
         if "policy_checks" not in row:
@@ -139,7 +134,6 @@ class AuditStore:
                      if type(value) in (int, float) and math.isfinite(value) and value >= 0]
         # Unknown legacy review evidence is excluded instead of counted as a
         # skipped model call. Cached reviews and rules fallbacks are false;
-        # async explanations never change this synchronous review marker.
         reviews = [(row.get("ai_review_detail") or {}).get("model_invoked") for row in payments]
         reviews = [value for value in reviews if type(value) is bool]
         return {"rows":rows, "stats":{
@@ -159,7 +153,7 @@ class AuditStore:
             (self._serialize(value) for value in self.connection.execute("SELECT * FROM audit WHERE run_id=? AND id<>? ORDER BY timestamp DESC, id DESC", (row["run_id"], identifier)))]
         return row
 
-    def flagged(self, decision=None, policy=None):
+    def flagged(self, decision=None, policy=None, reason_code=None):
         from .policy import POLICY_IDS
         rows = [row for row in self.report()["rows"] if row["tool"] in {"create_order", "create_payout"}
                 and row["computed_decision"] in {"BLOCK", "REQUIRE_APPROVAL"}]
@@ -168,6 +162,9 @@ class AuditStore:
         if policy:
             rows = [row for row in rows if row["policy"] == policy or any(check["id"] == policy and check["outcome"] == "fail"
                 for check in [*row["policy_checks"], *(check for recheck in row.get("policy_rechecks", []) for check in recheck["policy_checks"])])]
+        if reason_code:
+            rows = [row for row in rows if any(factor.get("code") == reason_code and factor.get("points", 0) > 0
+                    for factor in row.get("factors", []))]
         totals = {}
         for row in rows:
             totals[row["currency"]] = totals.get(row["currency"], Decimal(0)) + Decimal(str(row["amount"]))

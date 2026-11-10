@@ -77,7 +77,6 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
         for task in list(tasks):
             task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
-        await firewall.close()
         await paypal.close()
         await catalog.close()
         audit.close()
@@ -139,6 +138,16 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
             changes = dict(body)
             if isinstance(changes.get("enabled"), dict):
                 changes["enabled"] = {**before["enabled"], **changes["enabled"]}
+            if isinstance(changes.get("risk_weights"), dict):
+                changes["risk_weights"] = {**before["risk_weights"], **changes["risk_weights"]}
+            if "allowed_payees" in changes:
+                import re
+                recipients = changes["allowed_payees"]
+                address = re.compile(r"(?:[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,63}")
+                if not isinstance(recipients, list) or any(not isinstance(value, str) or len(value) > 254 or not address.fullmatch(value) for value in recipients):
+                    raise HTTPException(422, "Recipients must be email addresses or domains")
+                if len({value.lower() for value in recipients}) != len(recipients):
+                    raise HTTPException(422, "Duplicate recipient")
             updated = Policy.model_validate({**before, **changes})
             if updated.currency != "USD":
                 raise HTTPException(422, "The sandbox wallet supports USD policies only")
@@ -204,7 +213,6 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
         if approvals.pending:
             raise HTTPException(409, "Pending payment cleanup must finish before resetting sandbox data")
         # No await in the check/reset section: a new run cannot interleave.
-        firewall.cancel_explanations()
         audit.reset_sandbox_data()
         runs.clear()
         run_tasks.clear()
@@ -346,10 +354,10 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
         return audit.report()
 
     @app.get("/api/audit/flagged")
-    async def get_flagged(type: Literal["BLOCK", "REQUIRE_APPROVAL"] | None = None, policy: str | None = None):
+    async def get_flagged(type: Literal["BLOCK", "REQUIRE_APPROVAL"] | None = None, policy: str | None = None, reason_code: str | None = None):
         if policy is not None and policy not in POLICY_IDS:
             raise HTTPException(422, "Unknown policy")
-        return audit.flagged(type, policy)
+        return audit.flagged(type, policy, reason_code)
 
     @app.get("/api/audit/{identifier}")
     async def get_audit_event(identifier: str):

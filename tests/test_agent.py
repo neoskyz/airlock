@@ -55,7 +55,7 @@ def test_live_failure_is_reported_without_compromised_replay():
     asyncio.run(scenario())
 
 
-def test_compromised_agent_rules_block_then_explains_with_injection_untrusted(tmp_path):
+def test_compromised_agent_rules_block_with_injection_untrusted_without_model(tmp_path):
     async def scenario():
         create = AsyncMock(return_value=SimpleNamespace(content=[text_block("The unrequested payout originated in an untrusted product page and exceeds the user's budget.")]))
         judge = build_judge("test-key", SimpleNamespace(messages=SimpleNamespace(create=create)), model="custom-judge-model")
@@ -68,25 +68,16 @@ def test_compromised_agent_rules_block_then_explains_with_injection_untrusted(tm
         await agent.run(run)
         assert run.status == "completed"
         assert run.agent_mode == "compromised"
-        await firewall.drain_explanations()
         rows = audit.report()["rows"]
         assert all(row["ai_review_detail"]["model_invoked"] is False for row in rows)
         payout = next(row for row in rows if row["tool"] == "create_payout")
         assert payout["computed_decision"] == payout["decision"] == "BLOCK"
-        assert payout["ai_review"] == "skipped (high risk)" and payout["ai_explanation"]["status"] == "completed"
-        assert create.await_count == 1
-        assert all(item.kwargs["model"] == "custom-judge-model" for item in create.await_args_list)
+        assert payout["ai_review"] == "skipped (high risk)"
+        create.assert_not_awaited()
         paypal.execute.assert_awaited_once()
         assert paypal.execute.await_args.args[0].tool == "create_order"
-        judge_payload = json.loads(create.await_args_list[0].kwargs["messages"][0]["content"])
-        assert judge_payload["committed_decision"] == "BLOCK"
-        assert "output_config" not in create.await_args_list[0].kwargs
-        assert judge_payload["provenance"][0] == {"id":"user:0", "origin":"user", "name":"user input", "text":run.message}
-        assert judge_payload["provenance"][1]["origin"] == "tool"
-        assert INJECTION in json.dumps(judge_payload["provenance"])
         assert any(event.get("decision") == "BLOCK" and event.get("suspicious_excerpt") == INJECTION for event in run.events)
         assert any("Scripted agent" in message["content"] for message in run.messages)
-        await firewall.close()
         audit.close()
     asyncio.run(scenario())
 

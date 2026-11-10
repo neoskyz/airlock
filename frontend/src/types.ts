@@ -31,11 +31,9 @@ export interface Product {
   url?: string;
   category?: string;
 }
-export interface RiskFactor { name: string; points: number; reason: string }
-export interface AIExplanation { status: 'generating' | 'completed' | 'failed' | 'skipped_budget' | 'skipped_no_model'; text: string; latency_ms: number | null }
+export interface RiskFactor { code?: string; name: string; points: number; reason: string; policy_id?: string; parameter?: string }
 export interface Latency { decision_ms?: number | null; rules_ms: number; ai_review_ms: number; total_ms?: number; approval_ms?: number; execution_ms?: number; end_to_end_ms?: number }
 export interface Explainable {
-  ai_explanation?: AIExplanation | null;
   ai_review_detail?: ReviewDetail | null;
   risk_score?: number | null;
   factors?: RiskFactor[] | null;
@@ -66,6 +64,9 @@ export interface TimelineEvent extends Explainable {
   mock?: boolean;
 }
 export interface ClientApproval {
+  amount?: number | string;
+  payee?: string;
+  tool?: string;
   id: string;
   status: string;
   run_id?: string;
@@ -116,6 +117,7 @@ export interface ReviewDetail {
   status: string;
   decision: Decision | null;
   reason: string | null;
+  summary?: string | null;
   suspicious_excerpt: string | null;
   source: string | null;
   latency_ms: number | null;
@@ -174,6 +176,11 @@ export interface Policy {
   period: 'daily' | 'weekly';
   auto_approve_threshold: string | number;
   allowed_payees: string[];
+  allowed_payee_names?: Record<string, string>;
+  risk_weights?: Record<string, number>;
+  velocity_window_seconds?: number;
+  velocity_call_threshold?: number;
+  review_min_score?: number;
   unknown_payee_action: string;
   blocked_categories: string[];
   risk_approval_threshold: number;

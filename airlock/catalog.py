@@ -23,6 +23,20 @@ def prompt_budget(message):
     return max((Decimal(value) for value in values), default=None)
 
 
+
+def direct_merchant_url(url):
+    """Unwrap affiliate redirects (e.g. go.skimresources.com/?url=...) and drop tracking parameters."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    try:
+        parts = urlsplit(url)
+        target = dict(parse_qsl(parts.query)).get("url")
+        if target and target.startswith(("http://", "https://")) and parts.hostname and parts.hostname not in target:
+            parts = urlsplit(target)
+        query = [(k, v) for k, v in parse_qsl(parts.query) if not k.lower().startswith(("c3_", "utm_", "xcust", "sref"))]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+    except ValueError:
+        return url
+
 def fixture_image(kind="charger"):
     # Local, network-independent product illustration, including offline recordings.
     shape = ('<rect x="92" y="57" width="94" height="105" rx="18" fill="#e6e8eb"/><path d="M117 58V40m43 18V40" stroke="#bac0c8" stroke-width="8"/><rect x="121" y="142" width="36" height="8" rx="4" fill="#546172"/>' if kind == "charger" else '<path d="M67 100c0-60 150-60 150 0s-150 60-150 0" fill="none" stroke="#b5bfcc" stroke-width="12"/><rect x="56" y="84" width="26" height="34" rx="5" fill="#e6e8eb"/>')
@@ -111,7 +125,7 @@ class Channel3Catalog:
                 if image and urlparse(image).scheme not in {"https", "http"}:
                     image = None
                 category = raw.get("category") or {}
-                product = {"id":str(raw["id"]), "name":raw["title"], "price":f"{price:.2f}", "currency":"USD", "merchant":offer["domain"], "url":offer["url"], "description":raw.get("description") or "", "category":category.get("slug") or category.get("title") or "unknown", "image":image or fixture_image()}
+                product = {"id":str(raw["id"]), "name":raw["title"], "price":f"{price:.2f}", "currency":"USD", "merchant":offer["domain"], "url":direct_merchant_url(offer["url"]), "description":raw.get("description") or "", "category":category.get("slug") or category.get("title") or "unknown", "image":image or fixture_image()}
                 products.append(normalize_local(product))
         # This listing belongs to Airlock's simulated third-party marketplace, not Channel3.
         listing = normalize_local(marketplace_listing())

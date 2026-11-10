@@ -52,6 +52,7 @@ class Run:
                 safe["message"] = "Payment tool rejected the request"
             events.append(safe)
         approvals = [{"id":card["id"], "run_id":self.id, "status":card["status"],
+                      **{key:card[key] for key in ("amount", "payee", "tool") if key in card},
                       "console_url":f"/console?approval={card['id']}#approvals"}
                      for card in self.approvals]
         return deepcopy({"revision":self.revision, "id":self.id, "status":self.status, "messages":self.messages,

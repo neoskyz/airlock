@@ -8,6 +8,22 @@ from .models import Decision, ToolCall, Verdict
 POLICY_IDS = ("single_transaction", "period_budget", "allowlist", "categories", "risk_threshold")
 
 
+class RiskWeights(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    unknown_payee: int = Field(default=18, ge=0, le=100)
+    unknown_merchant: int = Field(default=50, ge=0, le=100)
+    new_payee: int = Field(default=20, ge=0, le=100)
+    not_requested: int = Field(default=30, ge=0, le=100)
+    negated: int = Field(default=50, ge=0, le=100)
+    over_budget: int = Field(default=20, ge=0, le=100)
+    above_auto_approve_limit: int = Field(default=20, ge=0, le=100)
+    payout_tool: int = Field(default=24, ge=0, le=100)
+    velocity: int = Field(default=10, ge=0, le=100)
+    unknown_merchant_velocity: int = Field(default=4, ge=0, le=100)
+    untrusted_source: int = Field(default=40, ge=0, le=100)
+    category: int = Field(default=5, ge=0, le=100)
+
+
 class Policy(BaseModel):
     """Five configurable payment policies; all monetary arithmetic uses Decimal.
 
@@ -22,6 +38,11 @@ class Policy(BaseModel):
     period: Literal["daily", "weekly"] = "weekly"
     auto_approve_threshold: Decimal = Field(default=50, ge=0, le=Decimal("1000000000000"))
     allowed_payees: list[str] = Field(default_factory=list)
+    allowed_payee_names: dict[str, str] = Field(default_factory=dict)
+    risk_weights: RiskWeights = Field(default_factory=RiskWeights)
+    velocity_window_seconds: int = Field(default=60, ge=1, le=86400)
+    velocity_call_threshold: int = Field(default=3, ge=1, le=10000)
+    review_min_score: int = Field(default=30, ge=1, le=84)
     unknown_payee_action: Literal["REQUIRE_APPROVAL", "BLOCK"] = "REQUIRE_APPROVAL"
     blocked_categories: list[str] = Field(default_factory=lambda: ["gift cards", "crypto", "gambling"])
     risk_approval_threshold: int = Field(default=60, ge=1, le=99)

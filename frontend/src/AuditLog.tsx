@@ -90,7 +90,7 @@ export default function AuditLog({
         <Icon name="search" size={18} />
         <input placeholder="Search tool, payee, ID, reason…" value={filter} onChange={event => setFilter(event.target.value)} aria-label="Search audit log" />
       </label>
-      <span>{rows.length} events · AG Grid Community</span>
+      <span>{rows.length} events</span>
     </div>
     <div className="audit-grid">
       <AgGridReact<AuditRow> theme={gridTheme} rowData={rows} columnDefs={columns} defaultColDef={{
@@ -104,6 +104,7 @@ export default function AuditLog({
         'audit-risk': params => params.data?.decision === 'BLOCK'
       }} overlayNoRowsTemplate={filter ? "<span>No audit events match your search.</span>" : "<span>No audit events yet. Start a task in the client.</span>"} />
     </div>
+    <div className="ag-grid-credit">Powered by AG Grid</div>
     <p className="audit-caption">SQLite audit ledger · Decisions reflect the active mode at evaluation. PayPal acceptance does not confirm settlement.</p>
   </>;
 }

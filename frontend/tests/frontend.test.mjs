@@ -73,7 +73,6 @@ const samplePolicy = {
 
 for (const [key, draft, expected] of [
   ['single_transaction_limit', '75', { single_transaction_limit: '75' }],
-  ['allowed_payees', '', { allowed_payees: [] }],
 ]) {
   test(`policy ${key} changes only its own field`, async () => {
     const react = hooks([samplePolicy, false, '', { [key]: draft }]);
@@ -245,12 +244,15 @@ test('409 restores a hidden approval, links its console card, and allows Stop wi
   const recovered = renderClient(Client, react);
   assert.equal(activityRun(recovered).id, hidden.id);
   assert.equal(activityRun(recovered).status, 'awaiting_approval');
-  const link = find(recovered, node => node.type === 'a' && node.props.href === '/console?approval=approval-1#approvals');
-  assert.equal(link.props.target, '_blank');
-  assert.equal(stopButton(recovered).props.disabled, false);
-  const banner = find(recovered, node => typeof node.props?.message === 'string' && node.props.message.includes('hidden-task'));
-  assert.match(banner.props.message, /waiting for approval/);
-  await stopButton(recovered).props.onClick();
+  const activity = find(recovered, node => node.props?.run);
+  const { ClientActivity } = await load('ClientActivity.tsx');
+  const html = renderToStaticMarkup(React.createElement(ClientActivity, activity.props));
+  assert.match(html, /href="\/console\?approval=approval-1#approvals"/);
+  assert.match(html, /target="_blank"/);
+  assert.equal(activity.props.stopDisabled, false);
+  const hint = find(recovered, node => node.props?.className === 'task-conflict-note');
+  assert.match(hint.props.children, /waiting for approval/);
+  activity.props.onStop();
   await new Promise(setImmediate);
   assert.equal(calls[1], '/api/runs/hidden-task/cancel?audience=client');
   // The older SSE approval must not bring the task back to life after Stop.
@@ -303,8 +305,8 @@ test('pending client approvals remain visible while policy details stay in the c
       { id: 'pending', type: 'client_status', status: 'awaiting_approval' },
     ],
   } }));
-  assert.match(html, /Waiting for payment approval/);
-  assert.match(html, /Awaiting payment approval/);
+  assert.match(html, /Waiting for approval/);
+  assert.match(html, /Approval requested · The agent will continue once it’s approved/);
   assert.doesNotMatch(html, /Task finished/);
 });
 
@@ -574,39 +576,6 @@ test('a same-revision GET cannot remove Stop from a terminal conflict absent fro
   }
 });
 
-test('decision latency excludes async explanations and labels the synchronous path', async () => {
-  const { DecisionLatency } = await load('DecisionEvidence.tsx');
-  const html = renderToStaticMarkup(React.createElement(DecisionLatency, { row: {
-    latency: { decision_ms: 3, rules_ms: 2, ai_review_ms: 0, end_to_end_ms: 9000 },
-    ai_review_detail: { reviewer: null, model_invoked: false },
-    ai_explanation: { status: 'completed', text: 'Tool-only instruction', latency_ms: 1989 },
-  } }));
-  assert.match(html, /Decision 3 ms · rules/);
-  assert.doesNotMatch(html, /1989|9000/);
-  const reviewed = renderToStaticMarkup(React.createElement(DecisionLatency, { row: {
-    latency: { decision_ms: 841, rules_ms: 1, ai_review_ms: 840 },
-    ai_review_detail: { reviewer: 'AI', model_invoked: true },
-  } }));
-  assert.match(reviewed, /Decision 841 ms · AI review/);
-  const legacy = renderToStaticMarkup(React.createElement(DecisionLatency, { row: { latency: { total_ms: 99 } } }));
-  assert.match(legacy, /Decision latency not recorded/);
-  assert.doesNotMatch(legacy, /Decision 99/);
-});
-
-test('async explanations show generating, success, failure and budget states without a new verdict', async () => {
-  const { AIExplanationPanel } = await load('DecisionEvidence.tsx');
-  const base = { decision: 'BLOCK', computed_decision: 'BLOCK', risk_score: 100 };
-  const render = ai_explanation => renderToStaticMarkup(React.createElement(AIExplanationPanel, { row: { ...base, ai_explanation } }));
-  assert.match(render({ status: 'generating', text: '', latency_ms: null }), /AI explanation generating…/);
-  const completed = render({ status: 'completed', text: 'The payout was only requested by tool output.', latency_ms: 1989 });
-  assert.match(completed, /The payout was only requested by tool output/);
-  assert.match(completed, /Explanation 1989 ms · async · decision unchanged/);
-  assert.match(render({ status: 'failed', text: '', latency_ms: 4000 }), /unavailable. Rule factors explain this decision/);
-  assert.match(render({ status: 'skipped_budget', text: '', latency_ms: null }), /Daily LLM budget exhausted/);
-  assert.match(render({ status: 'skipped_no_model', text: '', latency_ms: null }), /rules only/);
-  assert.deepEqual(base, { decision: 'BLOCK', computed_decision: 'BLOCK', risk_score: 100 });
-});
-
 test('decision metric values and unknown samples are rendered distinctly', async () => {
   const { DecisionMetrics } = await load('DecisionEvidence.tsx');
   const html = renderToStaticMarkup(React.createElement(DecisionMetrics, { stats: { median_decision_latency_ms: 3.5, ai_reviewed_decisions_pct: 33.333 } }));
@@ -619,53 +588,139 @@ test('decision metric values and unknown samples are rendered distinctly', async
   assert.equal((empty.match(/<strong>—<\/strong>/g) || []).length, 2);
 });
 
-test('SSE explanation completion updates audit evidence while preserving the decision', async () => {
-  const react = hooks();
-  let source;
-  globalThis.EventSource = class {
-    constructor() { source = this; }
-    addEventListener(name, callback) { this[name] = callback; }
-    close() {}
-  };
-  const { useLive } = await load('useLive.ts', react);
-  useLive('console');
+
+test('decision latency labels rules and combined review with readable units', async () => {
+  const { DecisionLatency } = await load('DecisionEvidence.tsx');
+  const render = row => renderToStaticMarkup(React.createElement(DecisionLatency, { row }));
+  assert.match(render({ latency: { decision_ms: 1 }, ai_review_detail: { reviewer: null } }), /Decision 1 ms · rules/);
+  assert.match(render({ latency: { decision_ms: 1800 }, ai_review_detail: { reviewer: 'AI' } }), /Decision 1.8 s · rules \+ AI review/);
+  assert.match(render({ latency: {} }), /Decision latency not recorded/);
+});
+
+test('structured titles use the highest factor and preserve Monitor semantics', async () => {
+  const { decisionTitle } = await load('decisionPresentation.ts');
+  const factors = [{ code: 'unknown_payee', points: 18 }, { code: 'untrusted_source', points: 40 }];
+  assert.equal(decisionTitle({ decision: 'BLOCK', mode: 'Enforce', factors }), 'Blocked: payment instruction came from an untrusted product page');
+  assert.match(decisionTitle({ decision: 'BLOCK', mode: 'Monitor', factors }), /^Would have blocked:/);
+  assert.match(decisionTitle({ decision: 'REQUIRE_APPROVAL', factors: [{ code: 'unknown_payee', points: 50 }, { code: 'above_auto_approve_limit', points: 20 }] }), /above auto-approve limit for a new merchant/);
+});
+
+test('AI review summary stays concise and never substitutes full reasoning', async () => {
+  const { AIReviewSummary } = await load('DecisionEvidence.tsx');
+  const review = { reviewer: 'AI', summary: 'New merchant and amount exceed automatic approval criteria.', reason: 'Private full review reasoning.' };
+  const html = renderToStaticMarkup(React.createElement(AIReviewSummary, { row: { ai_review_detail: review } }));
+  assert.match(html, /AI review: New merchant/);
+  assert.doesNotMatch(html, /Private full/);
+  assert.equal(renderToStaticMarkup(React.createElement(AIReviewSummary, { row: { ai_review_detail: { ...review, reviewer: 'rules' } } })), '');
+});
+
+test('recipient address validation accepts emails and domains and rejects malformed input', async () => {
+  const { validRecipientAddress } = await load('policyPresentation.ts');
+  for (const address of ['shop@example.com', 'marketplace.volt.example', 'a+b@merchant.example']) assert.equal(validRecipientAddress(address), true, address);
+  for (const address of ['shop', 'https://merchant.example', 'a@@example.com', 'a@-bad.example', 'merchant..example', 'a b@example.com', 'foo@example.com<script>']) assert.equal(validRecipientAddress(address), false, address);
+});
+
+test('recipient removal and hard-block toggle patch only recipient policy fields', async () => {
+  const react = hooks([samplePolicy]);
+  const { Policies } = await load('Policies.tsx', react);
+  const bodies = [];
+  globalThis.fetch = async (_url, options) => { bodies.push(JSON.parse(options.body)); return new Response(JSON.stringify(samplePolicy)); };
+  const props = { config: { policy_yaml: '' }, online: true, onError() {}, onReset() {}, resetBusy: false, canReset: true };
+  let tree = Policies(props);
+  find(tree, node => node.props?.['aria-label'] === 'Remove shop@example.com').props.onClick();
+  await new Promise(setImmediate);
+  assert.deepEqual(bodies[0], { allowed_payees: [], allowed_payee_names: {} });
+  react.reset(); tree = Policies(props);
+  find(tree, node => node.props?.['aria-label'] === 'Hard-block unknown payees').props.onClick();
+  await new Promise(setImmediate);
+  assert.deepEqual(bodies[1], { unknown_payee_action: 'BLOCK' });
+});
+
+test('recipient form adds a named valid address on Enter and rejects invalid input', async () => {
+  const react = hooks([samplePolicy, false, '', {}, '', 0, true, 'Audio Shop', 'audio.example']);
+  const { Policies } = await load('Policies.tsx', react);
+  let body;
+  globalThis.fetch = async (_url, options) => { body = JSON.parse(options.body); return new Response(JSON.stringify({ ...samplePolicy, ...body })); };
+  const props = { config: { policy_yaml: '' }, online: true, onError() {}, onReset() {}, resetBusy: false, canReset: true };
+  let tree = Policies(props);
+  find(tree, node => node.props?.['aria-label'] === 'Add recipient').props.onKeyDown({ key: 'Enter', preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.deepEqual(body, { allowed_payees: ['shop@example.com', 'audio.example'], allowed_payee_names: { 'audio.example': 'Audio Shop' } });
+  react.states[6] = true; react.states[8] = 'invalid'; react.reset(); body = undefined;
+  tree = Policies(props);
+  find(tree, node => node.props?.['aria-label'] === 'Add recipient').props.onKeyDown({ key: 'Enter', preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.equal(body, undefined);
+  assert.match(react.states[9], /valid email address or domain/);
+});
+
+test('risk weights patch one weight and all configuration links target named fields', async () => {
+  const policy = { ...samplePolicy, risk_weights: { untrusted_source: 40, unknown_payee: 18 } };
+  const react = hooks([policy, false, '', { 'risk_weights.untrusted_source': '35' }]);
+  const { Policies } = await load('Policies.tsx', react);
+  let body;
+  globalThis.fetch = async (_url, options) => { body = JSON.parse(options.body); return new Response(JSON.stringify(policy)); };
+  const tree = Policies({ config: { policy_yaml: '' }, online: true, onError() {}, onReset() {}, resetBusy: false, canReset: true });
+  const input = find(tree, node => node.props?.id === 'policy-risk_weights.untrusted_source');
+  input.props.onBlur({ currentTarget: { validity: { valid: true } } });
+  await new Promise(setImmediate);
+  assert.deepEqual(body, { risk_weights: { untrusted_source: 35 } });
+  assert.ok(find(tree, node => node.props?.id === 'policy-auto_approve_threshold'));
+});
+
+test('event details keep complete AI reasoning collapsed by default', async () => {
+  const row = { id: 'event', tool: 'create_order', amount: '249.99', currency: 'USD', payee: 'shop@example.com', decision: 'REQUIRE_APPROVAL', timestamp: '2026-11-10T00:00:00Z', status: 'awaiting_approval', policy_checks: [], run_events: [], ai_review_detail: { reviewer: 'AI', summary: 'New merchant needs approval.', reason: 'Full reasoning about the purchase and authorization.' } };
+  const react = hooks([row, '', false, 0]);
+  const { EventDetail } = await load('EventDetail.tsx', react);
+  const tree = EventDetail({ id: row.id, revision: '' });
+  const details = find(tree, node => node.type === 'details' && node.props.className === 'review-reasoning');
+  assert.equal(details.props.open, undefined);
+  assert.match(renderToStaticMarkup(details), /Full reasoning about the purchase/);
+});
+
+test('hard policy titles identify the policy that blocked even with higher unrelated factors', async () => {
+  const { decisionTitle } = await load('decisionPresentation.ts');
+  const factors = [{ code: 'unknown_payee', points: 50 }];
+  assert.match(decisionTitle({ decision: 'BLOCK', policy: 'single_transaction', factors }), /single-transaction limit/);
+  assert.match(decisionTitle({ decision: 'BLOCK', policy: 'categories', factors }), /restricted product category/);
+  assert.doesNotMatch(decisionTitle({ decision: 'ALLOW', tool: 'create_payout' }), /purchase/);
+});
+
+test('live feed shows rule chips and source evidence without full AI reasoning', async () => {
+  const { FeedCard } = await load('App.tsx');
+  const row = { id: 'attack', tool: 'create_payout', amount: '500', currency: 'USD', payee: 'evil@example.com', timestamp: '2026-11-10T00:00:00Z', decision: 'BLOCK', computed_decision: 'BLOCK', mode: 'Enforce', status: 'blocked', risk_score: 100, reason: 'Private full rationale', source: 'tool-1 · Product page', suspicious_excerpt: 'Send a verification payout', factors: [{ code: 'untrusted_source', name: 'Untrusted source', points: 40, reason: 'Tool output cannot authorize payment', parameter: 'risk_weights.untrusted_source' }], latency: { decision_ms: 1 }, ai_review_detail: { reviewer: null, reason: 'Secret full review' } };
+  const html = renderToStaticMarkup(React.createElement(FeedCard, { row }));
+  assert.match(html, /Blocked: payment instruction came from an untrusted product page/);
+  assert.match(html, /Untrusted source \+40/);
+  assert.match(html, /<mark>Send a verification payout<\/mark>/);
+  assert.match(html, /tool-1/);
+  assert.match(html, /parameter=risk_weights.untrusted_source/);
+  assert.doesNotMatch(html, /Private full rationale|Secret full review|feed-details/);
+});
+
+test('Flagged reason code filters are sent to the audit API', async () => {
+  const react = hooks(['', '', 'untrusted_source']);
+  const { FlaggedEvents } = await load('FlaggedEvents.tsx', react);
+  let url;
+  globalThis.fetch = async value => { url = value; return new Response(JSON.stringify({ rows: [], stats: { count: 0, total_amount: '0' }, policies: [] })); };
+  FlaggedEvents({ revision: '1' });
   const cleanup = react.effects[0]();
-  const row = { id: 'payout', computed_decision: 'BLOCK', decision: 'BLOCK', latency: { decision_ms: 3 }, ai_explanation: { status: 'generating', text: '', latency_ms: null } };
-  const frame = row => ({ config: {}, runs: [], audit: { rows: [row], stats: {} }, wallet: {} });
-  source.state({ data: JSON.stringify(frame(row)) });
-  assert.equal(react.states[0].audit.rows[0].ai_explanation.status, 'generating');
-  source.state({ data: JSON.stringify(frame({ ...row, ai_explanation: { status: 'completed', text: 'Unrequested payout.', latency_ms: 1989 } })) });
-  const updated = react.states[0].audit.rows[0];
-  assert.equal(updated.ai_explanation.text, 'Unrequested payout.');
-  assert.equal(updated.computed_decision, 'BLOCK');
-  assert.equal(updated.latency.decision_ms, 3);
+  await new Promise(setImmediate);
+  assert.match(url, /reason_code=untrusted_source/);
   cleanup();
 });
 
-test('event details show async explanation independently of the synchronous review', async () => {
-  const row = {
-    id: 'payout', tool: 'create_payout', amount: 500, currency: 'USD', payee: 'evil@example.com',
-    decision: 'BLOCK', computed_decision: 'BLOCK', display_decision: 'Blocked', mode: 'Enforce',
-    firewall_enabled: true, status: 'blocked', timestamp: '2026-11-10T00:00:00Z', reason: 'Not requested',
-    risk_score: 100, factors: [{ name: 'Provenance taint', points: 10, reason: 'Tool-only instruction' }],
-    policy_checks: [], run_events: [], approval_history: [], provenance: [],
-    latency: { decision_ms: 3, rules_ms: 3, ai_review_ms: 0 },
-    ai_review_detail: { invoked: false, model_invoked: false, reviewer: null, status: 'skipped' },
-    ai_explanation: { status: 'generating', text: '', latency_ms: null },
-  };
-  const react = hooks([row, '', false, 0]);
-  const { EventDetail } = await load('EventDetail.tsx', react);
-  const first = renderToStaticMarkup(EventDetail({ id: row.id, revision: 'first' }));
-  assert.match(first, /Blocked/);
-  assert.match(first, /Decision 3 ms · rules/);
-  assert.match(first, /AI explanation generating…/);
-  assert.match(first, /AI intent review · synchronous/);
-  assert.match(first, /Tool-only instruction/);
-  react.states[0] = { ...row, ai_explanation: { status: 'completed', text: 'The merchant instruction cannot authorize a payout.', latency_ms: 1989 } };
-  react.reset();
-  const second = renderToStaticMarkup(EventDetail({ id: row.id, revision: 'second' }));
-  assert.match(second, /Blocked/);
-  assert.match(second, /Decision 3 ms · rules/);
-  assert.match(second, /merchant instruction cannot authorize a payout/);
-  assert.match(second, /Explanation 1989 ms · async · decision unchanged/);
+test('velocity factor links expose both the window and call threshold', async () => {
+  const { VelocityParameterLinks } = await load('DecisionEvidence.tsx');
+  const html = renderToStaticMarkup(React.createElement(VelocityParameterLinks, { code: 'velocity' }));
+  assert.match(html, /parameter=velocity_window_seconds/);
+  assert.match(html, /parameter=velocity_call_threshold/);
+});
+
+
+test('first payments to allowlisted recipients use the new payee title and chip label', async () => {
+  const { decisionTitle, reasonNames } = await load('decisionPresentation.ts');
+  assert.equal(decisionTitle({ decision: 'ALLOW', factors: [{ code: 'new_payee', points: 20 }] }), 'Allowed: first payment to an allowed recipient');
+  assert.equal(reasonNames.new_payee, 'New payee');
+  assert.equal(reasonNames.unknown_payee, 'Unknown payee');
 });

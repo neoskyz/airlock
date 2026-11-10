@@ -1,9 +1,9 @@
 import { Fragment, useEffect, useState } from 'react';
 import { ApiError, request } from './api';
 import type { AuditEvent, AuditRow } from './types';
-import { ConsoleLink, eventDate, eventMoney, eventPath, policyNames } from './consoleNavigation';
+import { ConsoleLink, eventDate, eventMoney, eventPath, policyNames, policyParameterPath } from './consoleNavigation';
 import './consoleEvents.css';
-import { AIExplanationPanel, DecisionLatency } from './DecisionEvidence';
+import { DecisionLatency, VelocityParameterLinks } from './DecisionEvidence';
 export function EventDecision({
   row
 }: {
@@ -163,7 +163,7 @@ export function EventDetail({
                   {factor.name.replaceAll('_', ' ')}
                 </strong>
                 <p>
-                  {factor.reason}
+                  <ConsoleLink href={policyParameterPath(factor.parameter, factor.policy_id)} title="Configure this risk parameter">{factor.reason}</ConsoleLink><VelocityParameterLinks code={factor.code} />
                 </p>
               </div>
               <span className={factor.points > 0 ? 'event-risk-points' : ''}>
@@ -237,13 +237,12 @@ export function EventDetail({
             <Field label="Verdict">
               {review?.decision || 'No verdict'}
             </Field>
-            <Field label="Reason">
-              {review?.reason || (review?.status === 'skipped' ? current.ai_review : 'Not recorded')}
-            </Field>
+            <Field label="Summary">{review?.summary || 'Not recorded'}</Field>
             <Field label="Latency">
               {millis(review?.latency_ms ?? current.latency?.ai_review_ms)}
             </Field>
           </dl>
+          {review?.reason && <details className="review-reasoning"><summary>Full review reasoning</summary><p>{review.reason}</p></details>}
           {review?.suspicious_excerpt && <div className="event-excerpt">
             <span>Suspicious excerpt · {review.source || 'source not recorded'}</span>
             <mark>
@@ -264,9 +263,6 @@ export function EventDetail({
             <Field label="Decision latency">
               {millis(current.latency?.decision_ms)}
             </Field>
-            <Field label="Explanation (async)">
-              {millis(current.ai_explanation?.latency_ms)}
-            </Field>
             <Field label="Approval wait">
               {millis(current.latency?.approval_ms)}
             </Field>
@@ -279,7 +275,6 @@ export function EventDetail({
           </dl>
         </section>
       </div>
-      <AIExplanationPanel row={current} />
       <section className="event-panel">
         <h2>Provenance evidence</h2>
         <p className="event-muted">Original user instructions and untrusted tool output retain their recorded sources.</p>

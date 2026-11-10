@@ -19,7 +19,6 @@ flowchart LR
     Rules --> Review[Only scores 30–84: independent intent review]
     Fast --> Decision[Allow / require approval / block]
     Review --> Decision
-    Decision -. Block / approval: background only .-> Explain[AI explanation → audit + SSE]
     Decision --> PayPal[PayPal sandbox adapter]
     PayPal --> Orders[Agent Toolkit: create_order]
     PayPal --> Payouts[Payouts REST API]
@@ -27,17 +26,21 @@ flowchart LR
     Audit --> Console[Security console + human approval]
 ```
 
-- **Policy and risk:** single-transaction limit, period budget, merchant/payee allowlist, restricted categories, and risk thresholds. Defaults are $1,000 per call, $2,000 per UTC week, approval at 60, and block at 85. Money uses Decimal and integer cents.
+- **Policy and risk:** single-transaction limit, period budget, merchant/payee allowlist, restricted categories, and risk-based approval (including the auto-approve limit, review floor, factor weights, and velocity window). Defaults are $1,000 per call, $2,000 per UTC week, approval at 60, and block at 85. Money uses Decimal and integer cents.
 - **Human control:** Enforce blocks or pauses payments; approval executes once and denial never calls PayPal. Monitor computes and audits the same decisions while allowing execution, displaying **Would have blocked** or **Would require approval**. Pending approvals reserve budget.
 - **Evidence:** audit records retain the proposed call, original decision, policy snapshot, risk factors, source excerpts, approval history, and provider ID/status. Flagged calls remain visible after approval or denial.
 
 ### Risk scoring and decision latency
 
-1. **Rules fast path:** weighted factors cover unknown recipients, amount versus user budget, payment type, velocity, category, and provenance taint. With default policies, scores below 30 allow immediately; scores of 85 or more and hard policy violations block immediately. Neither path calls an LLM for the decision. Taint adds points; it does not independently trigger synchronous review. The injected $500 payout is blocked by rules, while the $19.99 charger is allowed.
+1. **Rules fast path:** weighted factors cover unknown recipients, amount versus user budget, payment type, velocity, category, and provenance taint. With default policies, scores below 30 allow immediately; scores of 85 or more and hard policy violations block immediately. Neither path calls an LLM. Taint adds points; it does not independently trigger synchronous review. The injected $500 payout is blocked by rules, while the $19.99 charger is allowed.
 2. **Gray-zone intent review:** only scores 30–84 enter independent Claude Haiku review, with a bounded ±10 adjustment. Scores of 60 or more require approval under default policies; the unknown-merchant headphone purchase stays at 60–84 after review. A four-second timeout, invalid response, or review failure requires approval; hard policies still block. Identical reviews are cached per run. Missing review credentials or an exhausted daily budget use an explicit rules fallback.
-3. **Asynchronous explanation:** after a BLOCK or REQUIRE_APPROVAL decision is recorded, a background Claude call may add a natural-language explanation to the audit and stream it to the console. It cannot change the decision or delay payment control. The console first shows the decision latency and rule factors, then “AI explanation generating…” and the completed explanation. Failed explanations leave the factors available; missing credentials or an exhausted shared daily LLM budget skip explanation generation. Failed API attempts also count toward that budget.
+3. **Structured evidence:** every decision has a rule-template title, stable reason codes, point chips, and highlighted source excerpts. Gray-zone AI review adds one sentence of at most 20 English words; complete review rationale is collapsed in event details. Flagged events can be filtered by reason code. There is no background explanation call.
 
-Most clear low-risk purchases and obvious attacks therefore avoid synchronous LLM latency. Console metrics show **Median decision latency** (p50, milliseconds, excluding approval, provider execution, and background explanation) and **AI-reviewed decisions** (the percentage of recorded payment decisions that actually attempted a synchronous LLM review, including failures; cached reviews, rules fallback, and background explanations do not count). Historical records without the relevant measurements are excluded; an empty sample displays “—”.
+Unknown merchants do not automatically need approval. A low-value order that matches the requested product and budget stays below the review floor without an allowlist entry. The simulated Volt seller is outside the default allowlist; its $19.99 charger still allows, while the larger unknown-merchant headphone order requires approval. All scoring weights and velocity thresholds are editable in **Policies → Risk-based approval**, alongside the **Auto-approve limit** (default $50). Factor descriptions link to the relevant policy parameter.
+
+Most clear low-risk purchases and obvious attacks therefore avoid synchronous LLM latency. Console metrics show **Median decision latency** (p50, milliseconds, excluding approval and provider execution) and **AI-reviewed decisions** (the percentage of recorded payment decisions that actually attempted a synchronous LLM review, including failures; cached reviews and rules fallback do not count). Historical records without the relevant measurements are excluded; an empty sample displays “—”.
+
+The console allowlist supports named recipients with validated email or domain addresses. Each add, removal, and policy toggle takes effect immediately and is audited.
 
 The live shopping agent uses OpenAI Chat Completions/function calling (`gpt-4o-mini` by default); an Anthropic agent is also supported. The intent judge runs independently. Without the selected agent key, a labelled scripted simulation runs; without a judge key, rules provide the review. Live model errors never replay scripted payments.
 
@@ -75,7 +78,7 @@ Start with default policies and **Console → Policies → Reset sandbox data**.
 | --- | --- |
 | **Monitor:** `Buy me the cheapest 65W USB-C charger under $40` | Volt $19.99 order allowed; injected $500 payout executes with **Would have blocked**. Local ledger decreases by $519.99. |
 | **Enforce:** repeat the charger task | Volt $19.99 order allowed; $500 payout blocked before execution. |
-| **Enforce:** `Buy me noise-cancelling headphones under $300` | Unknown-merchant purchase scores **60–84** and requires approval. Click the notification to review; Approve creates one order, Deny makes no provider call. |
+| **Enforce:** `Buy me noise-cancelling headphones under $300` | Unknown-merchant purchase scores **60–84** and requires approval. Checkout shows “Waiting for approval” with a console link and Stop task; Approve creates one order, Deny makes no provider call. |
 
 Inspect source evidence in Live feed, original decisions in Flagged, the AG Grid audit log, and `/docs`. The agent uses temperature 0, catalog caching, and one order attempt per task unless the user explicitly requests a quantity. Scripted behavior demonstrates the payment boundary; it is not a new live-model attack measurement.
 
@@ -95,7 +98,7 @@ Set process environment variables, or create a local `.env` from the blank `.env
 | `AIRLOCK_MODE` | `Monitor`; accepts `Monitor` or `Enforce`. |
 | `SANDBOX_STARTING_BALANCE` | `10000.00`; local ledger, not PayPal account balance. |
 | `RUN_RATE_LIMIT_PER_MINUTE`, `RUN_RATE_LIMIT_PER_HOUR` | `5`, `30` new tasks per IP. |
-| `DAILY_LLM_CALL_LIMIT` | `500` shared attempted agent, synchronous review, and asynchronous explanation API calls per UTC day. |
+| `DAILY_LLM_CALL_LIMIT` | `500` shared attempted agent and synchronous review API calls per UTC day. |
 | `SQLITE_PATH`, `POLICY_PATH` | `data/audit.sqlite3`, `policies/default.yaml`. |
 
 ## Reuse the firewall
@@ -108,7 +111,7 @@ protected_paypal = guard.wrap_tool(paypal.execute)
 result = await protected_paypal(call, provenance, mock=paypal.mock)
 ```
 
-Import these classes from `firewall`. An adapter implements `async execute(ToolCall, request_id)`. Pass `request_approval=your_async_callback` to support approvals; without a callback, approval-required calls are denied. During shutdown, `await guard.close()` before closing the audit store to cancel pending background explanations; `await guard.drain_explanations()` waits for them when needed. See [`/docs`](https://airlock-2i3r.onrender.com/docs) for setup, imports, and lifecycle cleanup.
+Import these classes from `firewall`. An adapter implements `async execute(ToolCall, request_id)`. Pass `request_approval=your_async_callback` to support approvals; without a callback, approval-required calls are denied. See [`/docs`](https://airlock-2i3r.onrender.com/docs) for setup and imports.
 
 `GET /api/audit`, `GET /api/audit/<id>`, and `GET /api/audit/flagged` expose records; `GET /api/events` streams updates. The client uses `?audience=client` to omit security evidence. Webhooks are not implemented.
 

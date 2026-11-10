@@ -25,7 +25,7 @@ export const policyNames: Record<string, string> = {
   period_budget: 'Period budget',
   allowlist: 'Merchant / payee allowlist',
   categories: 'Category restrictions',
-  risk_threshold: 'Risk score thresholds'
+  risk_threshold: 'Risk-based approval'
 };
 export function eventMoney(value: string | number | undefined, currency = 'USD') {
   try {
@@ -42,4 +42,8 @@ export function eventDate(value?: string) {
     dateStyle: 'medium',
     timeStyle: 'medium'
   }) : 'Not recorded';
+}
+
+export function policyParameterPath(parameter?: string, policyId = 'risk_threshold') {
+  return `/console?parameter=${encodeURIComponent(parameter || policyId)}#policies`;
 }

@@ -33,11 +33,11 @@ def test_factor_decomposition_and_call_specific_taint():
     score, factors, taint, _, _ = score_call(purchase(), p, firewall.policy)
     assert score == 20 and sum(f.points for f in factors) == score and not taint
     score, factors, taint, excerpt, source = score_call(attack(), p, firewall.policy)
-    assert score == 92 and sum(f.points for f in factors) == score and taint
+    assert score == 100 and sum(f.points for f in factors) == score and taint
     assert excerpt == INJECTION and "tool:1" in source
     score, factors, *_ = score_call(headphones(), Provenance("Buy me noise-cancelling headphones under $300"), firewall.policy)
     assert score == 70 and sum(f.points for f in factors) == 70
-    assert set(f.name for f in factors) >= {"Payee history", "User amount / intent", "Automatic amount", "Payment type", "Velocity", "Provenance taint", "Category"}
+    assert set(f.name for f in factors) >= {"Unknown payee", "Not requested by user", "Above auto-approve limit", "Payout tool", "Velocity", "Untrusted source", "Category"}
     audit.close()
 
 
@@ -56,7 +56,7 @@ def test_low_and_high_risk_skip_llm_but_gray_calls_review():
         assert judge.judge.await_count == 1
         row = audit.report()["rows"][0]
         assert row["ai_review"] == "skipped (high risk)"
-        assert row["risk_score"] == 92 and row["decision"] == "BLOCK"
+        assert row["risk_score"] == 100 and row["decision"] == "BLOCK"
         assert set(row["latency"]) == {"rules_ms", "ai_review_ms", "total_ms", "decision_ms", "end_to_end_ms"}
         assert row["latency"]["end_to_end_ms"] >= row["latency"]["total_ms"]
         audit.close()
@@ -269,7 +269,7 @@ def test_full_budget_cannot_hide_taint_explanation_or_trigger_ai_review():
         assert result["status"] == "blocked"
         row = audit.report()["rows"][0]
         assert row["reason"].startswith("Provenance taint:")
-        for reason in ["Unknown payee", "not requested by user", "Risk score 92", "Weekly period budget exceeded"]:
+        for reason in ["Unknown payee", "not requested by user", "Risk score 100", "Weekly period budget exceeded"]:
             assert reason in row["reason"]
         assert row["reason"].index("Weekly period budget") > row["reason"].index("Provenance taint")
         assert any(factor["name"] == "Period budget" and factor["points"] == 0 for factor in row["factors"])
@@ -341,7 +341,7 @@ def test_default_headphone_order_stays_in_approval_band(recent_calls, adjustment
         audit = AuditStore(":memory:")
         policy = Policy.load("policies/default.yaml")
         firewall = Firewall(policy, judge, audit)
-        audit.recent_count = lambda: recent_calls
+        audit.recent_count = lambda seconds=60, exclude_id=None: recent_calls
         call = headphones().model_copy(update={"amount":Decimal(amount)})
         execute = AsyncMock(return_value={"id":"MOCK-ORDER", "status":"CREATED"})
         async def approve(identifier, proposed, verdict):
@@ -364,4 +364,5 @@ def test_allowlist_checks_product_merchant_instead_of_sandbox_routing_payee():
     policy.unknown_payee_action = "BLOCK"
     assert policy.evaluate(call).decision == Decision.BLOCK
     volt = purchase().model_copy(update={"merchant":"marketplace.volt.example", "amount":Decimal("19.99")})
-    assert policy.evaluate(volt).decision == Decision.ALLOW
+    assert policy.evaluate(volt).decision == Decision.BLOCK
+    assert "marketplace.volt.example" not in policy.allowed_payees

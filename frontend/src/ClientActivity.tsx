@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { displayText, isRunBlocking } from './runUpdates';
+import { approvalHref, displayText, isRunBlocking } from './runUpdates';
 import type { Product, Run, TimelineEvent } from './types';
 import { eventMoney as money } from './consoleNavigation';
 import './clientActivity.css';
@@ -21,6 +21,7 @@ type Step = {
   selectedProduct?: string;
   result?: TimelineEvent;
   pending?: boolean;
+  approvalRequested?: boolean;
   product?: Product;
 };
 
@@ -66,7 +67,10 @@ export function activitySteps(events: TimelineEvent[]): Step[] {
       };
       steps.push(payment);
     } else if (event.status === 'awaiting_approval') {
-      if (payment && !payment.result) payment.pending = true;
+      if (payment && !payment.result) {
+        payment.pending = true;
+        payment.approvalRequested = true;
+      }
     } else if (event.type === 'tool_result') {
       if (!payment || payment.result) {
         payment = {
@@ -175,29 +179,40 @@ function PaymentStep({
   step,
   number,
   active,
-  interrupted
+  interrupted,
+  run,
+  onStop,
+  stopDisabled
 }: {
   step: Step;
   number: number;
   active: boolean;
   interrupted: boolean;
+  run: Run;
+  onStop?: () => void;
+  stopDisabled?: boolean;
 }) {
   const event = step.result || step.event;
   const rejected = event.status === 'blocked' || event.status === 'denied' || event.decision === 'BLOCK';
   const accepted = Boolean(step.result?.paypal_id);
   const unknown = event.status === 'unknown';
-  const waiting = Boolean(active && step.pending && !step.result);
+  const waiting = Boolean(active && (step.pending || run.status === 'awaiting_approval') && !step.result);
+  const approved = accepted && Boolean(step.approvalRequested || run.approvals?.some(card => card.status === 'approved' && (!('amount' in card) || String(card.amount) === String(step.event.amount))));
   const unresolved = !active && !step.result;
   const state = accepted ? 'complete' : rejected || unknown || interrupted || unresolved ? 'interrupted' : active && !step.result ? 'active' : 'complete';
-  const title = accepted ? step.event.tool === 'create_order' ? 'PayPal order created' : 'PayPal payout submitted' : rejected ? 'Payment tool rejected' : unknown ? 'Payment outcome unknown' : waiting ? 'Awaiting payment approval' : unresolved ? 'Payment result unavailable' : 'Checkout';
-  const description = accepted ? step.product ? productName(step.product) : event.message : rejected ? 'The payment tool rejected this request. No PayPal call was made.' : unknown ? 'Verify the PayPal sandbox before retrying this payment.' : interrupted || unresolved ? 'The task ended before a payment result was received. Check the payment status before retrying.' : waiting ? 'The agent will continue when the payment request receives a response.' : step.product ? `Preparing checkout for ${productName(step.product)}` : 'Submitting payment request';
-  return <article className={`activity-operation payment-operation ${state}`}>
+  const title = accepted ? step.event.tool === 'create_order' ? approved ? 'Approved · Order created' : 'PayPal order created' : 'PayPal payout submitted' : rejected ? 'Payment tool rejected' : unknown ? 'Payment outcome unknown' : waiting ? 'Waiting for approval' : unresolved ? 'Payment result unavailable' : 'Checkout';
+  const description = accepted ? step.product ? productName(step.product) : event.message : rejected ? 'The payment tool rejected this request. No PayPal call was made.' : unknown ? 'Verify the PayPal sandbox before retrying this payment.' : interrupted || unresolved ? 'The task ended before a payment result was received. Check the payment status before retrying.' : waiting ? 'Approval requested · The agent will continue once it’s approved.' : step.product ? `Preparing checkout for ${productName(step.product)}` : 'Submitting payment request';
+  return <article className={`activity-operation payment-operation ${state}${waiting ? ' waiting-approval' : ''}`}>
     <StepHeader number={number} title={title} description={description} state={state} label={accepted ? 'Accepted' : rejected ? 'Rejected' : unknown || unresolved ? 'Unconfirmed' : waiting ? 'Waiting' : interrupted ? 'Interrupted' : active && !step.result ? 'In progress' : step.result ? 'Complete' : 'No result'} />
     <div className="activity-payment-body">
       <span className="trace-amount">
         {money(step.event.amount ?? event.amount)}
         {step.event.payee || event.payee ? ` → ${step.event.payee || event.payee}` : ''}
       </span>
+      {waiting && <div className="approval-step-actions">
+        <a className="button secondary" href={approvalHref(run)} target="_blank" rel="noopener noreferrer">Review in Airlock ↗</a>
+        <button type="button" className="button stop" onClick={onStop} disabled={stopDisabled || !onStop}>Stop task</button>
+      </div>}
       {accepted && <div className="payment-receipt">
         <code>
           {event.paypal_id}
@@ -205,18 +220,31 @@ function PaymentStep({
         <span className="badge">
           {event.paypal_status || 'ACCEPTED'}
         </span>
-        {event.mock && <span className="badge amber">MOCK</span>}
+        {event.mock && <span className="badge">MOCK</span>}
       </div>}
     </div>
   </article>;
 }
 export function ClientActivity({
-  run
+  run,
+  onStop,
+  stopDisabled
 }: {
   run: Run;
+  onStop?: () => void;
+  stopDisabled?: boolean;
 }) {
   const steps = activitySteps(run.events || []);
   const active = isRunBlocking(run);
+  // A restored approval can arrive before its checkout events reach this tab.
+  if (run.status === 'awaiting_approval' && !steps.some(step => step.kind === 'payment' && !step.result)) {
+    const approval = run.approvals?.find(card => ['pending', 'awaiting_approval'].includes(card.status));
+    steps.push({ id: `approval-${approval?.id || run.id}`, kind: 'payment', pending: true, approvalRequested: true,
+      event: { id: `approval-${approval?.id || run.id}`, type: 'checkout', message: 'Waiting for approval',
+        tool: approval && 'tool' in approval ? approval.tool : undefined,
+        amount: approval && 'amount' in approval ? approval.amount : undefined,
+        payee: approval && 'payee' in approval ? approval.payee : undefined } });
+  }
   const end = useRef<HTMLDivElement>(null);
   const last = steps.at(-1);
   let current = last?.kind === 'payment' && last.result ? 'Finishing the task · waiting for the agent’s response' : 'Planning the next step';
@@ -228,7 +256,7 @@ export function ClientActivity({
     });
   }, [run.id, run.events.length, run.status]);
   return <div className="activity-trace client-activity">
-    {active && <div className="current-activity" role="status" aria-live="polite">
+    {active && run.status !== 'awaiting_approval' && <div className="current-activity" role="status" aria-live="polite">
       <i />
       <div>
         <span>Current step</span>
@@ -242,7 +270,7 @@ export function ClientActivity({
         const isLast = index === steps.length - 1;
         const interrupted = isLast && !active && ['failed', 'cancelled'].includes(run.status) && !step.result;
         if (step.kind === 'payment') return <li key={step.id}>
-        <PaymentStep step={step} number={index + 1} active={active && isLast} interrupted={interrupted} />
+        <PaymentStep step={step} number={index + 1} active={active && isLast} interrupted={interrupted} run={run} onStop={onStop} stopDisabled={stopDisabled} />
       </li>;
         if (step.kind === 'page' && step.product) {
           const state = interrupted ? 'interrupted' : 'complete';

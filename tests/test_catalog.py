@@ -110,3 +110,10 @@ def test_headphone_fixture_matches_shopping_request_without_poisoned_listing():
         assert all(not product.get("marketplace") for product in products)
         await catalog.close()
     asyncio.run(scenario())
+
+
+def test_affiliate_redirects_are_unwrapped_to_direct_merchant_urls():
+    from airlock.catalog import direct_merchant_url
+    wrapped = "https://go.skimresources.com/?id=1X2&url=https%3A%2F%2Fwww.kohls.com%2Fproduct%2Fprd-1.jsp%3Fc3_click_id%3Dabc%26c3_vendor%3Dx&xcust=abc&sref=x"
+    assert direct_merchant_url(wrapped) == "https://www.kohls.com/product/prd-1.jsp"
+    assert direct_merchant_url("https://www.belkin.com/p/c?c3_click_id=1&color=white") == "https://www.belkin.com/p/c?color=white"

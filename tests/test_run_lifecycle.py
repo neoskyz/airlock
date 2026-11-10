@@ -116,7 +116,7 @@ def test_pending_approval_visible_in_safe_snapshot_and_conflict_and_reset(tmp_pa
                 assert safe["status"] == full["status"] == "awaiting_approval"
                 assert len(safe["approvals"]) == 1
                 card = safe["approvals"][0]
-                assert set(card) == {"id", "run_id", "status", "console_url"}
+                assert set(card) == {"id", "run_id", "status", "console_url", "amount", "payee", "tool"}
                 assert card["run_id"] == identifier and card["status"] == "pending"
                 assert "approval=" + card["id"] in card["console_url"]
                 assert "provenance" in full["approvals"][0]

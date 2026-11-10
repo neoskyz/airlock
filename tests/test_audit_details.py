@@ -47,7 +47,6 @@ def test_event_detail_records_call_five_policy_snapshot_review_evidence_and_run_
         assert not review["invoked"] and not review["model_invoked"] and review["reviewer"] is None
         assert review["status"] == "skipped" and review["decision"] is None
         assert review["reason"] and review["latency_ms"] == 0
-        assert event["ai_explanation"]["status"] == "skipped_no_model"
         assert event["latency"]["decision_ms"] >= 0
         source = next(source for source in event["provenance"] if source["id"] in event["source"])
         assert event["suspicious_excerpt"] in source["text"]
@@ -253,7 +252,7 @@ def test_threshold_change_during_judge_review_applies_to_decision_but_preserves_
         firewall = Firewall(policy, judge, audit)
         executor = AsyncMock()
         approval = AsyncMock(return_value=False)
-        result = await firewall.invoke(ToolCall(tool="create_order", amount="20", payee="shop", merchant="sony.com", category="electronics", description="headphones"), Provenance("Buy me headphones under $40"), executor, request_approval=approval)
+        result = await firewall.invoke(ToolCall(tool="create_order", amount="20", payee="shop", merchant="sony.com", category="electronics", description=""), Provenance("Buy me headphones under $40"), executor, request_approval=approval)
         assert result["computed_decision"] == "REQUIRE_APPROVAL"
         approval.assert_awaited_once()
         executor.assert_not_awaited()
@@ -319,10 +318,10 @@ def test_approved_payment_rechecks_current_risk_without_rewriting_initial_eviden
         event = audit.report()["rows"][0]
         assert event["computed_decision"] == "REQUIRE_APPROVAL" and event["decision"] == "BLOCK"
         assert event["risk_score"] == 70 and event["policy_snapshot"]["auto_approve_threshold"] == "500"
-        assert next(factor for factor in event["factors"] if factor["name"] == "Automatic amount")["points"] == 0
+        assert next(factor for factor in event["factors"] if factor["name"] == "Above auto-approve limit")["points"] == 0
         recheck = event["policy_rechecks"][-1]
         assert recheck["stage"] == "after_approval" and recheck["risk_score"] == 90
-        assert next(factor for factor in recheck["factors"] if factor["name"] == "Automatic amount")["points"] == 20
+        assert next(factor for factor in recheck["factors"] if factor["name"] == "Above auto-approve limit")["points"] == 20
         assert [entry["action"] for entry in event["approval_history"]] == ["requested", "approved"]
         assert audit.reserve_total() == 0
         judge.judge.assert_awaited_once()

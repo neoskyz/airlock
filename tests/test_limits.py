@@ -110,7 +110,7 @@ def test_mid_live_shared_budget_stops_without_replaying_payment(tmp_path, provid
             client=client,budget=budget)
         run = Run("Buy me a USB-C charger under $40",True,agent_mode="live")
         # The host has already opened this catalog product before checkout.
-        run.selected_product = {"id":"budget-test-charger", "category":"electronics", "merchant":"marketplace.volt.example", "price":"29", "currency":"USD"}
+        run.selected_product = {"id":"budget-test-charger", "category":"electronics", "merchant":"shop@chargers.example", "price":"29", "currency":"USD"}
         await agent.run(run)
         assert run.status == "completed"
         assert run.agent_mode == "live"  # Preserve the identity of the agent that actually ran.

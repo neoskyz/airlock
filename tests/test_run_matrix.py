@@ -191,6 +191,10 @@ async def workspace(tmp_path, *, mode="Enforce", judge_behavior="normal", unknow
                         sqlite_path=str(tmp_path / "matrix.sqlite3"), frontend_dist=str(tmp_path))
     app = create_app(settings, paypal=paypal, judge=judge, catalog=catalog)
     app.state.firewall.review_timeout = .01
+    if unknown_requires_approval:
+        # This matrix explicitly tests a stricter unknown-recipient policy.
+        # Default small matching purchases now correctly take the rules path.
+        app.state.firewall.policy.risk_weights.unknown_payee = 50
     provider = FakeOpenAI()
     app.state.agent.client = provider
     async with app.router.lifespan_context(app):

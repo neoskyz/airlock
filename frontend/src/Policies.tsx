@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { request } from './api';
 import { Icon, Badge } from './ui';
 import type { Config, Policy } from './types';
+import { validRecipientAddress, recipientLabel, riskWeightLabels } from './policyPresentation';
 const policyDefinitions = [{
   key: 'single_transaction',
   title: 'Single-transaction limit',
@@ -24,7 +25,7 @@ const policyDefinitions = [{
   tag: 'Hard limit'
 }, {
   key: 'risk_threshold',
-  title: 'Risk score thresholds',
+  title: 'Risk-based approval',
   description: 'Require human approval or block based on the final explainable risk score.',
   tag: 'Human review'
 }];
@@ -52,6 +53,32 @@ export function Policies({
   const [retry, setRetry] = useState(0);
   const revision = useRef(0);
   const saveLock = useRef(false);
+  const [addingRecipient, setAddingRecipient] = useState(false);
+  const [recipientName, setRecipientName] = useState('');
+  const [recipientAddress, setRecipientAddress] = useState('');
+  const [recipientError, setRecipientError] = useState('');
+  const parameter = new URLSearchParams(typeof location === 'undefined' ? '' : location.search).get('parameter');
+  useEffect(() => {
+    if (!policy || !parameter || typeof document === 'undefined') return;
+    const element = document.getElementById(`policy-${parameter}`);
+    element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    element?.focus({ preventScroll: true });
+  }, [policy, parameter]);
+  async function addRecipient() {
+    const address = recipientAddress.trim().toLowerCase();
+    if (!validRecipientAddress(address)) { setRecipientError('Enter a valid email address or domain.'); return; }
+    if (policy?.allowed_payees.some(value => value.toLowerCase() === address)) { setRecipientError('This recipient is already listed.'); return; }
+    if (!policy) return;
+    setRecipientError('');
+    const applied = await update({ allowed_payees: [...policy.allowed_payees, address], allowed_payee_names: { ...policy.allowed_payee_names, [address]: recipientName.trim() || recipientLabel(address) } }, 'allowed_payees');
+    if (!applied) return;
+    setRecipientAddress(''); setRecipientName(''); setAddingRecipient(false);
+  }
+  async function removeRecipient(address: string) {
+    if (!policy) return;
+    const names = { ...policy.allowed_payee_names }; delete names[address];
+    await update({ allowed_payees: policy.allowed_payees.filter(value => value !== address), allowed_payee_names: names }, 'allowed_payees');
+  }
   useEffect(() => {
     const controller = new AbortController();
     const currentRevision = ++revision.current;
@@ -88,18 +115,21 @@ export function Policies({
         return next;
       });
       onError('');
+      return true;
     } catch (error) {
       onError(`Policy update failed: ${(error as Error).message}`);
+      return false;
     } finally {
       saveLock.current = false;
       setSaving(false);
     }
   }
   function field(key: string, label: string, value: string | number, commit: (text: string) => Partial<Policy>, type = 'number') {
-    const score = key.startsWith('risk_');
+    const score = ['risk_approval_threshold', 'risk_block_threshold', 'review_min_score'].includes(key);
+    const integer = score || key.startsWith('risk_weights.') || key.startsWith('velocity_');
     return <label className="policy-field">
     {label}
-    <input aria-label={label} type={type} min={type === 'number' ? score ? 1 : key === 'auto_approve_threshold' ? 0 : 0.01 : undefined} max={score ? 100 : undefined} step={type === 'number' ? score ? 1 : '0.01' : undefined} value={drafts[key] ?? value} disabled={saving || !online} onChange={event => setDrafts(current => ({
+    <input id={`policy-${key}`} aria-label={label} type={type} min={type === 'number' ? integer ? key.startsWith('risk_weights.') ? 0 : 1 : key === 'auto_approve_threshold' ? 0 : 0.01 : undefined} max={key === 'review_min_score' ? 84 : key === 'risk_approval_threshold' ? 99 : score || key.startsWith('risk_weights.') ? 100 : undefined} step={type === 'number' ? integer ? 1 : '0.01' : undefined} value={drafts[key] ?? value} disabled={saving || !online} onChange={event => setDrafts(current => ({
         ...current,
         [key]: event.target.value
       }))} onBlur={event => {
@@ -131,7 +161,7 @@ export function Policies({
       <span>{loadError} Displaying the last loaded policy.</span>
       <button onClick={() => setRetry(value => value + 1)}>Retry</button>
     </div>}
-    {policyDefinitions.map((definition, index) => <section key={definition.key} className={`policy-card ${policy.enabled?.[definition.key] === false ? 'disabled' : ''}`}>
+    {policyDefinitions.map((definition, index) => <section id={`policy-${definition.key}`} tabIndex={-1} key={definition.key} className={`policy-card ${policy.enabled?.[definition.key] === false ? 'disabled' : ''}`}>
       <div className="policy-card-header">
         <span className="policy-number">0{index + 1}</span>
         <div>
@@ -171,26 +201,35 @@ export function Policies({
           </label>
         </>}
         {definition.key === 'allowlist' && <>
-          {field('allowed_payees', 'Allowed recipients · comma separated', policy.allowed_payees.join(', '), value => ({
-            allowed_payees: value.split(',').map(item => item.trim()).filter(Boolean)
-          }), 'text')}
-          <label className="checkbox-field"><input type="checkbox" checked={policy.unknown_payee_action === 'BLOCK'} disabled={saving || !online} onChange={event => void update({
-              unknown_payee_action: event.target.checked ? 'BLOCK' : 'REQUIRE_APPROVAL'
-            }, definition.key)} />Hard-block unknown payees</label>
+          <div className="recipient-manager" id="policy-allowed_payees" tabIndex={-1}>
+            <div className="recipient-list-header"><span>Allowed recipients</span><button type="button" className="button secondary" disabled={saving || !online} onClick={() => setAddingRecipient(value => !value)}>+ Add recipient</button></div>
+            {addingRecipient && <div className="recipient-add-form" role="group" aria-label="Add recipient" onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void addRecipient(); } }}>
+              <label>Name<input aria-label="Recipient name" value={recipientName} disabled={saving || !online} onChange={event => setRecipientName(event.target.value)} placeholder="Recipient name" maxLength={100} /></label>
+              <label>Email or domain<input aria-label="Recipient address" value={recipientAddress} disabled={saving || !online} onChange={event => { setRecipientAddress(event.target.value); setRecipientError(''); }} placeholder="shop@example.com or merchant.example" maxLength={254} /></label>
+              <button type="button" className="button primary" disabled={saving || !online} onClick={() => void addRecipient()}>Add</button>
+              {recipientError && <p className="recipient-error" role="alert">{recipientError}</p>}
+            </div>}
+            <ul className="recipient-list">{policy.allowed_payees.map(address => <li key={address}><div><strong>{policy.allowed_payee_names?.[address] || recipientLabel(address)}</strong><span title={address}>{address}</span></div><button type="button" disabled={saving || !online} onClick={() => void removeRecipient(address)} aria-label={`Remove ${address}`}>Remove</button></li>)}</ul>
+            {!policy.allowed_payees.length && <p className="recipient-empty">No recipients added.</p>}
+          </div>
+          <div className="policy-toggle-field" id="policy-unknown_payee_action"><span>Hard-block unknown payees</span><button className={`toggle ${policy.unknown_payee_action === 'BLOCK' ? 'on' : ''}`} role="switch" aria-checked={policy.unknown_payee_action === 'BLOCK'} aria-label="Hard-block unknown payees" disabled={saving || !online} onClick={() => void update({ unknown_payee_action: policy.unknown_payee_action === 'BLOCK' ? 'REQUIRE_APPROVAL' : 'BLOCK' }, 'unknown_payee_action')}><span /></button></div>
         </>}
         {definition.key === 'categories' && field('blocked_categories', 'Restricted categories · comma separated', policy.blocked_categories.join(', '), value => ({
           blocked_categories: value.split(',').map(item => item.trim()).filter(Boolean)
         }), 'text')}
         {definition.key === 'risk_threshold' && <>
+          {field('review_min_score', 'Start AI review at score', policy.review_min_score ?? 30, value => ({ review_min_score: Number(value) }))}
           {field('risk_approval_threshold', 'Require approval at score', policy.risk_approval_threshold, value => ({
             risk_approval_threshold: Number(value)
           }))}
           {field('risk_block_threshold', 'Block at score', policy.risk_block_threshold, value => ({
             risk_block_threshold: Number(value)
           }))}
-          {field('auto_approve_threshold', 'Amount risk reference · USD', policy.auto_approve_threshold, value => ({
+          {field('auto_approve_threshold', 'Auto-approve limit · USD', policy.auto_approve_threshold, value => ({
             auto_approve_threshold: value
           }))}
+          <div className="risk-parameter-group"><h4>Risk factor weights</h4><p>Points added by each factor. Changes apply to the next policy evaluation.</p><div className="risk-parameter-fields">{Object.entries(policy.risk_weights || {}).map(([key, value]) => <div key={key}>{field(`risk_weights.${key}`, riskWeightLabels[key] || key.replaceAll('_', ' '), value, text => ({ risk_weights: { [key]: Number(text) } }))}</div>)}</div></div>
+          <div className="risk-parameter-group"><h4>Payment velocity</h4><div className="risk-parameter-fields">{field('velocity_call_threshold', 'Calls before velocity risk', policy.velocity_call_threshold ?? 3, value => ({ velocity_call_threshold: Number(value) }))}{field('velocity_window_seconds', 'Velocity window · seconds', policy.velocity_window_seconds ?? 60, value => ({ velocity_window_seconds: Number(value) }))}</div></div>
         </>}
       </div>
     </section>)}

@@ -4,6 +4,7 @@ import type { FlaggedAudit } from './types';
 import { EventDecision } from './EventDetail';
 import { ConsoleLink, eventDate, eventMoney, eventPath, policyNames } from './consoleNavigation';
 import './consoleEvents.css';
+import { reasonNames } from './decisionPresentation';
 export function FlaggedEvents({
   revision
 }: {
@@ -11,6 +12,7 @@ export function FlaggedEvents({
 }) {
   const [type, setType] = useState('');
   const [policy, setPolicy] = useState('');
+  const [reason, setReason] = useState('');
   const [result, setResult] = useState<FlaggedAudit | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -22,6 +24,7 @@ export function FlaggedEvents({
     const query = new URLSearchParams();
     if (type) query.set('type', type);
     if (policy) query.set('policy', policy);
+    if (reason) query.set('reason_code', reason);
     void request<FlaggedAudit>(`/api/audit/flagged?${query}`, {
       signal: controller.signal
     }).then(value => {
@@ -32,10 +35,10 @@ export function FlaggedEvents({
       if (!controller.signal.aborted) setLoading(false);
     });
     return () => controller.abort();
-  }, [type, policy, revision, retry]);
-  function filter(kind: 'type' | 'policy', value: string) {
+  }, [type, policy, reason, revision, retry]);
+  function filter(kind: 'type' | 'policy' | 'reason', value: string) {
     setResult(null);
-    if (kind === 'type') setType(value);else setPolicy(value);
+    if (kind === 'type') setType(value);else if (kind === 'policy') setPolicy(value);else setReason(value);
   }
   const totals = result?.stats.totals_by_currency;
   const totalLabel = totals && Object.keys(totals).length ? Object.entries(totals).map(([currency, amount]) => eventMoney(amount, currency)).join(' · ') : eventMoney(result?.stats.total_amount || 0, result?.stats.currency || 'USD');
@@ -52,10 +55,12 @@ export function FlaggedEvents({
             {name}
           </option>)}
         </select></label>
-      {(type || policy) && <button className="button secondary" onClick={() => {
+      <label>Reason<select value={reason} onChange={event => filter('reason', event.target.value)}><option value="">All reason codes</option>{Object.entries(reasonNames).map(([code, title]) => <option key={code} value={code}>{title} · {code}</option>)}</select></label>
+      {(type || policy || reason) && <button className="button secondary" onClick={() => {
         setResult(null);
         setType('');
         setPolicy('');
+        setReason('');
       }}>Clear filters</button>}
     </div>
     {error && <div className="error-banner" role="alert">
@@ -92,7 +97,7 @@ export function FlaggedEvents({
             <th>Time / tool</th>
             <th>Amount / recipient</th>
             <th>Decision / mode</th>
-            <th>Triggered policies</th>
+            <th>Policies / reasons</th>
             <th>Approval / execution</th>
             <th>Event</th>
           </tr>
@@ -137,6 +142,7 @@ export function FlaggedEvents({
               </span>) : <span>
                 {policyNames[row.policy || ''] || row.policy || 'Not recorded'}
               </span>}
+              <div className="flagged-reason-codes">{[...new Set((row.factors || []).filter(factor => factor.points > 0 && factor.code).map(factor => factor.code))].map(code => <code key={code}>{code}</code>)}</div>
             </td>
             <td>
               <strong>
@@ -159,7 +165,7 @@ export function FlaggedEvents({
       {!loading && result?.rows.length === 0 && <div className="empty-panel">
         <h3>No flagged events</h3>
         <p>
-          {type || policy ? 'No events match these filters.' : 'Blocked and approval-required decisions will appear here.'}
+          {type || policy || reason ? 'No events match these filters.' : 'Blocked and approval-required decisions will appear here.'}
         </p>
       </div>}
       {loading && !result && <div className="empty-panel" role="status">Loading flagged events…</div>}
