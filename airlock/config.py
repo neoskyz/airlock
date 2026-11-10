@@ -5,16 +5,19 @@ from typing import Literal
 
 ROOT = Path(__file__).resolve().parent.parent
 AgentMode = Literal["live", "compromised"]
+AgentProvider = Literal["openai", "anthropic"]
 
 
 @dataclass
 class Settings:
+    openai_api_key: str = ""
     anthropic_api_key: str = ""
     paypal_client_id: str = ""
     paypal_client_secret: str = ""
     demo_mode: bool = False
-    agent_mode: AgentMode = "compromised"
-    agent_model: str = "claude-sonnet-5-5"
+    agent_mode: AgentMode = "live"
+    agent_provider: AgentProvider = "openai"
+    agent_model: str = ""
     judge_model: str = "claude-haiku-5-5"
     sqlite_path: str = "data/audit.sqlite3"
     policy_path: str = str(ROOT / "policies/default.yaml")
@@ -26,6 +29,10 @@ class Settings:
     frontend_dist: str = str(ROOT / "frontend/dist")
 
     def __post_init__(self):
+        if self.agent_provider not in {"openai", "anthropic"}:
+            raise ValueError("AGENT_PROVIDER must be openai or anthropic")
+        if not self.agent_model:
+            self.agent_model = "gpt-4o-mini" if self.agent_provider == "openai" else "claude-sonnet-5-5"
         if self.run_rate_limit_per_minute <= 0 or self.run_rate_limit_per_hour <= 0:
             raise ValueError("RUN_RATE_LIMIT_PER_MINUTE and RUN_RATE_LIMIT_PER_HOUR must be positive")
         if self.daily_llm_call_limit < 0:
@@ -34,10 +41,18 @@ class Settings:
             raise ValueError("AGENT_MODE must be live or compromised")
 
     def resolve_agent_mode(self, requested: AgentMode | None = None) -> AgentMode:
-        if not self.anthropic_api_key:
+        if not self.agent_api_key:
             return "compromised"
         # DEMO_MODE is a legacy default; an explicit UI selection can override it.
         return requested or ("compromised" if self.demo_mode else self.agent_mode)
+
+    @property
+    def agent_api_key(self):
+        return self.openai_api_key if self.agent_provider == "openai" else self.anthropic_api_key
+
+    @property
+    def agent_key_name(self):
+        return "OPENAI_API_KEY" if self.agent_provider == "openai" else "ANTHROPIC_API_KEY"
 
     @property
     def scripted(self):
@@ -50,12 +65,14 @@ class Settings:
             run_rate_limit_per_minute=int(os.getenv("RUN_RATE_LIMIT_PER_MINUTE", "5")),
             run_rate_limit_per_hour=int(os.getenv("RUN_RATE_LIMIT_PER_HOUR", "30")),
             daily_llm_call_limit=int(os.getenv("DAILY_LLM_CALL_LIMIT", "500")),
+            openai_api_key=os.getenv("OPENAI_API_KEY", ""),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             paypal_client_id=os.getenv("PAYPAL_CLIENT_ID", ""),
             paypal_client_secret=os.getenv("PAYPAL_CLIENT_SECRET", ""),
             demo_mode=os.getenv("DEMO_MODE", "false").lower() in {"true", "1", "yes"},
-            agent_mode=os.getenv("AGENT_MODE", "compromised"),
-            agent_model=os.getenv("AGENT_MODEL") or "claude-sonnet-5-5",
+            agent_mode=os.getenv("AGENT_MODE", "live"),
+            agent_provider=os.getenv("AGENT_PROVIDER", "openai"),
+            agent_model=os.getenv("AGENT_MODEL") or "",
             judge_model=os.getenv("JUDGE_MODEL") or "claude-haiku-5-5",
             sqlite_path=os.getenv("SQLITE_PATH", "data/audit.sqlite3"),
             policy_path=os.getenv("POLICY_PATH", str(ROOT / "policies/default.yaml")),

@@ -8,7 +8,10 @@ from firewall import Provenance
 class Run:
     message: str
     firewall_enabled: bool
-    agent_mode: str = "compromised"
+    agent_mode: str = "live"
+    agent_provider: str = "scripted"
+    agent_model: str = "Simulated compromised agent"
+    judge_model: str = "rules (no API key)"
     id: str = field(default_factory=lambda: uuid4().hex)
     status: str = "running"
     messages: list = field(default_factory=list)
@@ -23,7 +26,7 @@ class Run:
         self.provenance = Provenance(self.message)
 
     def snapshot(self):
-        return {key:getattr(self,key) for key in ("id","status","firewall_enabled","agent_mode","messages","events","approvals","error","judge_mode","llm_degraded")}
+        return {key:getattr(self,key) for key in ("id","status","firewall_enabled","agent_mode","agent_provider","agent_model","judge_model","messages","events","approvals","error","judge_mode","llm_degraded")}
 
     async def emit(self, event):
         self.events.append({"id":uuid4().hex, **event})

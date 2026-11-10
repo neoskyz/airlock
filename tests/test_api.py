@@ -51,13 +51,13 @@ def test_agent_mode_api_validation_and_honest_no_key_fallback(tmp_path):
         identifier=client.post("/api/runs",json={"message":"hello","agent_mode":"live"}).json()["id"]
         run=poll(client,identifier)
         assert run["agent_mode"] == "compromised"
-        assert any("Live Claude agent unavailable" in message["content"] for message in run["messages"])
+        assert any("Live openai agent unavailable" in message["content"] for message in run["messages"])
         assert any("Simulated compromised agent" in message["content"] for message in run["messages"])
 
 
 def test_api_default_mode_and_live_selection_with_legacy_demo_mode(tmp_path):
     from unittest.mock import AsyncMock
-    settings=Settings(anthropic_api_key="test-key",demo_mode=True,agent_model="custom-agent",judge_model="custom-judge",sqlite_path=str(tmp_path/"live.sqlite3"),frontend_dist=str(tmp_path))
+    settings=Settings(agent_provider="anthropic", anthropic_api_key="test-key",demo_mode=True,agent_model="custom-agent",judge_model="custom-judge",sqlite_path=str(tmp_path/"live.sqlite3"),frontend_dist=str(tmp_path))
     app=create_app(settings,paypal=MockPayPal(),judge=RuleJudge())
     app.state.agent.live=AsyncMock()
     with TestClient(app) as client:
@@ -67,4 +67,23 @@ def test_api_default_mode_and_live_selection_with_legacy_demo_mode(tmp_path):
         assert config["agent_model"] == "custom-agent"
         identifier=client.post("/api/runs",json={"message":"hello","agent_mode":"live"}).json()["id"]
         assert poll(client,identifier)["agent_mode"] == "live"
+        app.state.agent.live.assert_awaited_once()
+
+
+
+def test_openai_default_live_identity_with_independent_anthropic_judge(tmp_path):
+    from unittest.mock import AsyncMock
+    settings = Settings(openai_api_key="test-openai", anthropic_api_key="test-anthropic",
+        sqlite_path=str(tmp_path/"openai.sqlite3"), frontend_dist=str(tmp_path))
+    app = create_app(settings, paypal=MockPayPal())
+    app.state.agent.live = AsyncMock()
+    with TestClient(app) as client:
+        config = client.get("/api/config").json()
+        assert config["agent_mode"] == "live" and config["live_available"]
+        assert config["agent_provider"] == "openai" and config["agent_model"] == "gpt-4o-mini"
+        assert config["judge_mode"] == "anthropic" and config["judge_model"] == "claude-haiku-5-5"
+        identifier = client.post("/api/runs", json={"message":"hello"}).json()["id"]
+        run = poll(client, identifier)
+        assert run["agent_provider"] == "openai" and run["agent_model"] == "gpt-4o-mini"
+        assert run["judge_model"] == "claude-haiku-5-5"
         app.state.agent.live.assert_awaited_once()

@@ -6,7 +6,8 @@ def test_model_overrides_read_process_environment(monkeypatch):
     monkeypatch.setenv("AGENT_MODEL", "test-agent-model")
     monkeypatch.setenv("JUDGE_MODEL", "test-judge-model")
     monkeypatch.setenv("AGENT_MODE", "live")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("AGENT_PROVIDER", "openai")
     monkeypatch.delenv("DEMO_MODE", raising=False)
     settings = Settings.from_env()
     assert settings.agent_model == "test-agent-model"
@@ -14,14 +15,19 @@ def test_model_overrides_read_process_environment(monkeypatch):
     assert settings.resolve_agent_mode() == "live"
 
 
-def test_compromised_default_and_no_key_live_fallback():
+def test_live_default_and_provider_specific_key_fallback():
+    assert Settings(openai_api_key="test-key").resolve_agent_mode() == "live"
     assert Settings(anthropic_api_key="test-key").resolve_agent_mode() == "compromised"
+    assert Settings(agent_provider="anthropic", anthropic_api_key="test-key").resolve_agent_mode() == "live"
+    assert Settings(agent_provider="anthropic", openai_api_key="test-key").resolve_agent_mode() == "compromised"
+    assert Settings().agent_model == "gpt-4o-mini"
+    assert Settings(agent_provider="anthropic").agent_model == "claude-sonnet-5-5"
     assert Settings(agent_mode="live").resolve_agent_mode() == "compromised"
     assert Settings().resolve_agent_mode("live") == "compromised"
 
 
 def test_legacy_demo_default_can_be_overridden_by_explicit_live_selection():
-    settings = Settings(anthropic_api_key="test-key", agent_mode="live", demo_mode=True)
+    settings = Settings(openai_api_key="test-key", agent_mode="live", demo_mode=True)
     assert settings.resolve_agent_mode() == "compromised"
     assert settings.resolve_agent_mode("live") == "live"
 
@@ -29,3 +35,8 @@ def test_legacy_demo_default_can_be_overridden_by_explicit_live_selection():
 def test_invalid_agent_mode_rejected():
     with pytest.raises(ValueError, match="AGENT_MODE"):
         Settings(agent_mode="unknown")
+
+
+def test_invalid_agent_provider_rejected():
+    with pytest.raises(ValueError, match="AGENT_PROVIDER"):
+        Settings(agent_provider="unknown")

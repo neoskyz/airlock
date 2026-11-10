@@ -1,4 +1,5 @@
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from types import SimpleNamespace
@@ -78,7 +79,8 @@ def test_failed_judge_attempt_consumes_budget_and_only_quota_uses_rules():
     asyncio.run(scenario())
 
 
-def test_mid_live_shared_budget_stops_without_replaying_payment(tmp_path):
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_mid_live_shared_budget_stops_without_replaying_payment(tmp_path, provider):
     async def scenario():
         budget = DailyLLMBudget(2)
         args = {"amount":"29", "payee":"shop@chargers.example", "description":"charger"}
@@ -91,12 +93,21 @@ def test_mid_live_shared_budget_stops_without_replaying_payment(tmp_path):
         firewall = Firewall(Policy.load("policies/default.yaml"), judge, audit)
         paypal = MockPayPal()
         paypal.execute = AsyncMock(wraps=paypal.execute)
-        agent = DemoAgent(Settings(anthropic_api_key="test-key"), firewall, paypal, ApprovalManager(),
-            client=SimpleNamespace(messages=SimpleNamespace(create=agent_create)),budget=budget)
+        if provider == "openai":
+            from openai.types.chat import ChatCompletion
+            agent_create.return_value = ChatCompletion.model_validate({"id":"chat-test", "object":"chat.completion", "created":0, "model":"gpt-4o-mini",
+                "choices":[{"index":0, "finish_reason":"tool_calls", "message":{"role":"assistant", "content":None,
+                    "tool_calls":[{"id":"order-1", "type":"function", "function":{"name":"create_order", "arguments":json.dumps(args)}}]}}]})
+            client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=agent_create)))
+        else:
+            client = SimpleNamespace(messages=SimpleNamespace(create=agent_create))
+        agent = DemoAgent(Settings(agent_provider=provider, openai_api_key="test-key", anthropic_api_key="test-key"), firewall, paypal, ApprovalManager(),
+            client=client,budget=budget)
         run = Run("Buy me a USB-C charger under $40",True,agent_mode="live")
         await agent.run(run)
         assert run.status == "completed"
         assert run.agent_mode == "live"  # Preserve the identity of the agent that actually ran.
+        assert run.agent_provider == provider
         assert run.llm_degraded and run.judge_mode == "rules"
         assert any("stopped to avoid replaying" in item["content"] for item in run.messages)
         assert agent_create.await_count == judge_create.await_count == paypal.execute.await_count == 1
@@ -106,7 +117,7 @@ def test_mid_live_shared_budget_stops_without_replaying_payment(tmp_path):
 
 
 def test_exhausted_api_degrades_agent_judge_and_recovers_next_day(tmp_path):
-    app = create_app(Settings(anthropic_api_key="test-key",agent_mode="live",daily_llm_call_limit=1,
+    app = create_app(Settings(agent_provider="anthropic", anthropic_api_key="test-key",agent_mode="live",daily_llm_call_limit=1,
         sqlite_path=str(tmp_path/"audit.sqlite3")),paypal=MockPayPal())
     today = [date(2026,11,9)]
     app.state.llm_budget.clock = lambda: today[0]

@@ -67,7 +67,7 @@ def create_app(settings=None, *, paypal=None, judge=None):
     def runtime_modes():
         degraded = budget.exhausted
         return {**budget.snapshot(), "agent_mode": "compromised" if degraded else settings.resolve_agent_mode(),
-                "live_available": bool(settings.anthropic_api_key) and not degraded,
+                "live_available": bool(settings.agent_api_key) and not degraded,
                 "judge_mode": "rules" if degraded else judge.mode,
                 "judge_model": "rules (daily LLM limit reached)" if degraded else getattr(judge,"model",settings.judge_model) if judge.mode == "anthropic" else "rules (no API key)"}
 
@@ -75,7 +75,7 @@ def create_app(settings=None, *, paypal=None, judge=None):
     async def config():
         modes = runtime_modes()
         return {"demo_mode": modes["agent_mode"] == "compromised", "paypal_mode": paypal.mode,
-                "agent_model": settings.agent_model,
+                "agent_provider": settings.agent_provider, "agent_model": settings.agent_model,
                 "policy_yaml": yaml.safe_dump(policy.model_dump(mode="json"), sort_keys=False),
                 "shop_email": settings.shop_email, "contractor_email": settings.contractor_email,
                 **modes}
@@ -89,9 +89,8 @@ def create_app(settings=None, *, paypal=None, judge=None):
             raise HTTPException(422,"Message cannot be blank")
         if any(run.status in {"running","awaiting_approval"} for run in runs.values()):
             raise HTTPException(409,"Finish the current demo run before starting another")
-        run = Run(body.message,body.firewall_enabled,agent_mode=settings.resolve_agent_mode(body.agent_mode))
-        if body.agent_mode == "live" and run.agent_mode != "live":
-            await run.say("Live Claude agent unavailable without ANTHROPIC_API_KEY; using Simulated compromised agent.")
+        requested = body.agent_mode or ("compromised" if settings.demo_mode else settings.agent_mode)
+        run = Run(body.message,body.firewall_enabled,agent_mode=requested)
         runs[run.id] = run
         task = asyncio.create_task(agent.run(run))
         tasks.add(task)
@@ -105,7 +104,8 @@ def create_app(settings=None, *, paypal=None, judge=None):
         run = runs[identifier]
         # Runs retain their actual agent mode; the judge badge tracks the current fallback.
         modes = runtime_modes()
-        run.judge_mode, run.llm_degraded = modes["judge_mode"], modes["llm_degraded"]
+        if run.status in {"running", "awaiting_approval"}:
+            run.judge_mode, run.llm_degraded, run.judge_model = modes["judge_mode"], modes["llm_degraded"], modes["judge_model"]
         return run.snapshot()
 
     @app.post("/api/approvals/{identifier}")

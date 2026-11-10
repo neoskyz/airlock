@@ -1,4 +1,5 @@
 export type AgentMode = 'live' | 'compromised';
+export type AgentProvider = 'openai' | 'anthropic';
 export type Decision = 'ALLOW' | 'BLOCK' | 'REQUIRE_APPROVAL' | 'BYPASS';
 export interface Config {
   demo_mode: boolean;
@@ -7,6 +8,7 @@ export interface Config {
   llm_degraded: boolean;
   judge_mode?: string;
   paypal_mode: string;
+  agent_provider: AgentProvider;
   agent_model: string;
   judge_model: string;
   policy_yaml: string;
@@ -49,6 +51,9 @@ export interface Run {
   status: 'running' | 'awaiting_approval' | 'completed' | 'failed';
   firewall_enabled: boolean;
   agent_mode: AgentMode;
+  agent_provider: AgentProvider | 'scripted';
+  agent_model: string;
+  judge_model: string;
   messages: { role: string; content: string }[];
   events: TimelineEvent[];
   approvals: Approval[];

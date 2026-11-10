@@ -22,17 +22,21 @@ services:
       - key: DAILY_LLM_CALL_LIMIT
         value: '500'
       - key: AGENT_MODE
-        value: compromised
+        value: live
+      - key: AGENT_PROVIDER
+        value: openai
       - key: AGENT_MODEL
-        value: claude-sonnet-5-5
+        value: gpt-4o-mini
       - key: JUDGE_MODEL
         value: claude-haiku-5-5
       - key: DEMO_MODE
-        value: 'true'
+        value: 'false'
       - key: SQLITE_PATH
         value: data/audit.sqlite3
       - key: POLICY_PATH
         value: policies/default.yaml
+      - key: OPENAI_API_KEY
+        sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: PAYPAL_CLIENT_ID
