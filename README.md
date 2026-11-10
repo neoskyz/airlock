@@ -1,5 +1,9 @@
 # Airlock
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE) [![Live demo](https://img.shields.io/badge/Live%20demo-airlock--2i3r.onrender.com-blue)](https://airlock-2i3r.onrender.com)
+
+**Live demo:** https://airlock-2i3r.onrender.com · **License:** [MIT](LICENSE)
+
 A reusable payment firewall that checks an AI agent's intent, policy, and input provenance before it calls PayPal.
 
 Built for the PayPal AI Hackathon. The sole product scope is the [2:30 demo script](docs/demo_script.md): an injected shopping page, payment protection, human approval, and an AG Grid audit trail.
