@@ -72,3 +72,24 @@ class Policy(BaseModel):
             if risk_score >= self.risk_approval_threshold:
                 return Verdict(decision=Decision.REQUIRE_APPROVAL, reason=f"Risk score {risk_score} meets approval threshold {self.risk_approval_threshold}", policy="risk_threshold")
         return Verdict(decision=Decision.ALLOW, reason="Payment policies passed", policy="risk_threshold")
+
+    def checks(self, call: ToolCall, reserved: Decimal, *, risk_score: int, review_required=False):
+        """Evidence snapshot for all five policies, without short-circuiting."""
+        category = lambda value: value.lower().replace("_", " ").replace("-", " ").strip()
+        known = call.payee.lower() in {payee.lower() for payee in self.allowed_payees}
+        definitions = [
+            ("single_transaction", "Single-transaction limit", call.amount <= self.single_transaction_limit,
+             f"{call.amount} {call.currency}; limit {self.single_transaction_limit} {self.currency}"),
+            ("period_budget", "Period budget", reserved + call.amount <= self.daily_limit,
+             f"{self.period.title()} reserved {reserved} + proposed {call.amount}; limit {self.daily_limit} {self.currency}"),
+            ("allowlist", "Merchant / payee allowlist", known,
+             "Recipient is on the allowlist" if known else f"Recipient is outside the allowlist; {'hard block' if self.unknown_payee_action == 'BLOCK' else 'adds risk'}"),
+            ("categories", "Category restrictions", category(call.category) not in {category(value) for value in self.blocked_categories},
+             f"Category: {call.category or 'not supplied'}; restricted: {', '.join(self.blocked_categories) or 'none'}"),
+            ("risk_threshold", "Risk thresholds", risk_score < self.risk_approval_threshold and not review_required,
+             f"Score {risk_score}; approval at {self.risk_approval_threshold}, block at {self.risk_block_threshold}" + ("; intent review requires intervention" if review_required else "")),
+        ]
+        return [{"id":key, "title":title, "enabled":self.enabled[key],
+                 "passed":passed if self.enabled[key] else None,
+                 "outcome":("pass" if passed else "fail") if self.enabled[key] else "disabled", "reason":reason}
+                for key, title, passed, reason in definitions]

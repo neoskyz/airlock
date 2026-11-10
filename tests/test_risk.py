@@ -56,7 +56,8 @@ def test_low_risk_skips_llm_but_gray_and_tainted_calls_review():
         assert judge.judge.await_count == 2
         row = audit.report()["rows"][0]
         assert row["risk_score"] == 92 and row["decision"] == "BLOCK"
-        assert set(row["latency"]) == {"rules_ms", "ai_review_ms", "total_ms"}
+        assert set(row["latency"]) == {"rules_ms", "ai_review_ms", "total_ms", "end_to_end_ms"}
+        assert row["latency"]["end_to_end_ms"] >= row["latency"]["total_ms"]
         audit.close()
     asyncio.run(scenario())
 

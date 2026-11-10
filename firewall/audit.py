@@ -27,6 +27,8 @@ class AuditStore:
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(audit)")}
         if "metadata" not in columns:
             self.connection.execute("ALTER TABLE audit ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+        for row in self.connection.execute("SELECT id FROM audit WHERE status='awaiting_approval'").fetchall():
+            self.record_approval(row["id"], "cancelled", actor="System (server restart)")
         self.connection.execute("UPDATE audit SET decision='BLOCK', status='cancelled', reason=reason || '; server restarted before approval' WHERE status='awaiting_approval'")
         self.connection.execute("UPDATE audit SET status='unknown' WHERE status='executing'")
         self.connection.commit()
@@ -44,10 +46,11 @@ class AuditStore:
         cutoff = (datetime.now(timezone.utc)-timedelta(seconds=seconds)).isoformat()
         return self.connection.execute("SELECT COUNT(*) FROM audit WHERE timestamp>=? AND amount_cents>0", (cutoff,)).fetchone()[0]
 
-    def insert(self, call: ToolCall, verdict: Verdict, run_id: str, enabled: bool, mock: bool, provenance: list, status: str):
+    def insert(self, call: ToolCall, verdict: Verdict, run_id: str, enabled: bool, mock: bool, provenance: list, status: str, *, evidence=None):
         identifier = uuid4().hex
         metadata = verdict.model_dump(mode="json")
-        metadata.update(category=call.category, product_id=call.product_id, computed_decision=verdict.decision.value)
+        metadata.update(category=call.category, description=call.description, product_id=call.product_id, computed_decision=verdict.decision.value, call=call.model_dump(mode="json"), approval_history=[], execution_result=None)
+        metadata.update(evidence or {})
         self.connection.execute("INSERT INTO audit (id,timestamp,run_id,tool,amount_cents,currency,payee,decision,reason,paypal_id,status,mock,firewall_enabled,suspicious_excerpt,source,provenance,paypal_status,reserved_day,metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
             identifier, datetime.now(timezone.utc).isoformat(), run_id, call.tool, int(call.amount*100), call.currency,
             call.payee, verdict.decision.value, verdict.reason, None, status, int(mock), int(enabled),
@@ -76,25 +79,76 @@ class AuditStore:
         self.connection.execute(f"UPDATE audit SET {', '.join(key+'=?' for key in values)} WHERE id=?", (*values.values(), identifier))
         self.connection.commit()
 
+    def update_metadata(self, identifier, **values):
+        stored = self.connection.execute("SELECT metadata FROM audit WHERE id=?", (identifier,)).fetchone()
+        if stored is None:
+            raise KeyError(identifier)
+        metadata = json.loads(stored[0])
+        metadata.update(values)
+        self.connection.execute("UPDATE audit SET metadata=? WHERE id=?", (json.dumps(metadata, default=str), identifier))
+        self.connection.commit()
+
+    def record_approval(self, identifier, action, *, actor="System"):
+        stored = self.connection.execute("SELECT metadata FROM audit WHERE id=?", (identifier,)).fetchone()
+        if stored is None:
+            raise KeyError(identifier)
+        history = json.loads(stored[0]).get("approval_history", [])
+        history.append({"actor":actor, "timestamp":datetime.now(timezone.utc).isoformat(), "action":action})
+        self.update_metadata(identifier, approval_history=history)
+
+    @staticmethod
+    def _serialize(stored):
+        row = dict(stored)
+        metadata = json.loads(row.pop("metadata"))
+        row.update({key:value for key,value in metadata.items() if key not in row})
+        row["initial_reason"] = metadata.get("reason")
+        defaults = {"risk_score":None, "factors":[], "latency":None,
+            "ai_review":"not recorded", "policy":"", "mode":"Enforce" if row["firewall_enabled"] else "Monitor",
+            "computed_decision":row["decision"], "category":"", "description":None, "product_id":"",
+            "call":None, "policy_snapshot":None, "ai_review_detail":None, "approval_history":[], "execution_result":None}
+        for key, default in defaults.items():
+            row.setdefault(key, default)
+        if "policy_checks" not in row:
+            from .policy import POLICY_IDS
+            row["policy_checks"] = [{"id":key,"enabled":None,"passed":None,"outcome":"unknown","reason":"Not recorded for this event"} for key in POLICY_IDS]
+        row["enforced_decision"] = "ALLOW" if row["status"] in {"succeeded", "executing", "unknown"} else row["decision"] if row["firewall_enabled"] else "ALLOW"
+        row["display_decision"] = decision_label(row["computed_decision"] if row["mode"] == "Monitor" else row["decision"], row["mode"])
+        row["amount"] = row.pop("amount_cents") / 100
+        row["mock"] = bool(row["mock"])
+        row["firewall_enabled"] = bool(row["firewall_enabled"])
+        row["provenance"] = json.loads(row["provenance"])
+        return row
+
     def report(self):
-        rows = []
-        for stored in self.connection.execute("SELECT * FROM audit ORDER BY timestamp DESC"):
-            row = dict(stored)
-            metadata = json.loads(row.pop("metadata"))
-            row.update({key:metadata.get(key, default) for key, default in {"risk_score":0,"factors":[],"latency":{"rules_ms":0,"ai_review_ms":0,"total_ms":0},"ai_review":"not recorded","policy":"","mode":"Enforce" if row["firewall_enabled"] else "Monitor","computed_decision":row["decision"],"category":"","product_id":""}.items()})
-            for key in ("before", "after"):
-                if key in metadata:
-                    row[key] = metadata[key]
-            row["enforced_decision"] = "ALLOW" if row["status"] in {"succeeded", "executing", "unknown"} else row["decision"] if row["firewall_enabled"] else "ALLOW"
-            row["display_decision"] = decision_label(row["computed_decision"] if row["mode"] == "Monitor" else row["decision"], row["mode"])
-            row["amount"] = row.pop("amount_cents") / 100
-            row["mock"] = bool(row["mock"])
-            row["firewall_enabled"] = bool(row["firewall_enabled"])
-            row["provenance"] = json.loads(row["provenance"])
-            rows.append(row)
+        rows = [self._serialize(stored) for stored in self.connection.execute("SELECT * FROM audit ORDER BY timestamp DESC, id DESC")]
         blocked = sum((Decimal(str(row["amount"])) for row in rows if row["status"] in {"blocked", "denied"}), Decimal(0))
         allowed = sum((Decimal(str(row["amount"])) for row in rows if row["status"] == "succeeded"), Decimal(0))
         return {"rows":rows, "stats":{"blocked_amount":float(blocked), "allowed_amount":float(allowed)}}
+
+    def event(self, identifier):
+        stored = self.connection.execute("SELECT * FROM audit WHERE id=?", (identifier,)).fetchone()
+        if stored is None:
+            return None
+        row = self._serialize(stored)
+        keys = ("id", "timestamp", "tool", "amount", "currency", "decision", "computed_decision", "display_decision", "status")
+        row["run_events"] = [{key:other[key] for key in keys} for other in
+            (self._serialize(value) for value in self.connection.execute("SELECT * FROM audit WHERE run_id=? AND id<>? ORDER BY timestamp DESC, id DESC", (row["run_id"], identifier)))]
+        return row
+
+    def flagged(self, decision=None, policy=None):
+        from .policy import POLICY_IDS
+        rows = [row for row in self.report()["rows"] if row["tool"] in {"create_order", "create_payout"}
+                and row["computed_decision"] in {"BLOCK", "REQUIRE_APPROVAL"}]
+        if decision:
+            rows = [row for row in rows if row["computed_decision"] == decision]
+        if policy:
+            rows = [row for row in rows if row["policy"] == policy or any(check["id"] == policy and check["outcome"] == "fail"
+                for check in [*row["policy_checks"], *(check for recheck in row.get("policy_rechecks", []) for check in recheck["policy_checks"])])]
+        totals = {}
+        for row in rows:
+            totals[row["currency"]] = totals.get(row["currency"], Decimal(0)) + Decimal(str(row["amount"]))
+        return {"rows":rows, "stats":{"count":len(rows), "total_amount":f"{totals.get('USD', Decimal(0)):.2f}",
+                "currency":"USD", "totals_by_currency":{currency:f"{amount:.2f}" for currency,amount in totals.items()}}, "policies":list(POLICY_IDS)}
 
     def reset_sandbox_data(self):
         """Erase only the local demo ledger; never change provider state."""

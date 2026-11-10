@@ -32,12 +32,12 @@ export interface Product {
   category?: string;
 }
 export interface RiskFactor { name: string; points: number; reason: string }
-export interface Latency { rules_ms: number; ai_review_ms: number; total_ms?: number }
+export interface Latency { rules_ms: number; ai_review_ms: number; total_ms?: number; approval_ms?: number; execution_ms?: number; end_to_end_ms?: number }
 export interface Explainable {
-  risk_score?: number;
-  factors?: RiskFactor[];
-  latency?: Latency;
-  ai_review?: string;
+  risk_score?: number | null;
+  factors?: RiskFactor[] | null;
+  latency?: Latency | null;
+  ai_review?: string | null;
   policy?: string;
   mode?: Mode;
   enforced_decision?: Decision;
@@ -89,6 +89,31 @@ export interface Run {
   judge_mode?: string;
   llm_degraded?: boolean;
 }
+export interface PolicyCheck {
+  id: string;
+  enabled: boolean | null;
+  passed: boolean | null;
+  outcome: 'pass' | 'fail' | 'disabled' | 'unknown';
+  reason: string;
+  title?: string;
+}
+export interface ReviewDetail {
+  invoked: boolean | null;
+  model_invoked: boolean | null;
+  reviewer: string | null;
+  cached: boolean | null;
+  status: string;
+  decision: Decision | null;
+  reason: string | null;
+  suspicious_excerpt: string | null;
+  source: string | null;
+  latency_ms: number | null;
+}
+export interface ApprovalRecord { actor: string; timestamp: string; action: string }
+export interface AuditCall {
+  tool: string; amount: string | number; currency: string; payee: string;
+  description: string; category: string; product_id: string;
+}
 export interface AuditRow extends Explainable {
   id: string;
   timestamp: string;
@@ -107,6 +132,23 @@ export interface AuditRow extends Explainable {
   suspicious_excerpt?: string;
   source?: string;
   provenance?: { id: string; name: string; origin: string; text: string }[];
+}
+export interface AuditEvent extends AuditRow {
+  call: AuditCall | null;
+  policy_checks: PolicyCheck[];
+  policy_snapshot: Record<string, unknown> | null;
+  ai_review_detail: ReviewDetail | null;
+  approval_history: ApprovalRecord[];
+  execution_result: Record<string, unknown> | null;
+  policy_rechecks?: { stage: string; policy_snapshot: Record<string, unknown> | null; policy_checks: PolicyCheck[] }[];
+  run_events: AuditRow[];
+  description?: string;
+  category?: string;
+}
+export interface FlaggedAudit {
+  rows: (AuditRow & { policy_checks?: PolicyCheck[]; policy_rechecks?: { policy_checks: PolicyCheck[] }[]; approval_history?: ApprovalRecord[] })[];
+  stats: { count: number; total_amount: string; currency?: string; totals_by_currency?: Record<string, string> };
+  policies: string[];
 }
 export interface Audit {
   rows: AuditRow[];

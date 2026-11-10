@@ -7,7 +7,7 @@ Airlock reviews payment tool calls against policy, user intent, and their source
 | Page | Purpose |
 | --- | --- |
 | [`/client`](https://airlock-2i3r.onrender.com/client) | Agentic Payment Client: task input, catalog search, product pages, checkout trace, and sandbox wallet. |
-| [`/console`](https://airlock-2i3r.onrender.com/console) | Live feed, approval inbox, five editable policies, and AG Grid Community audit log. |
+| [`/console`](https://airlock-2i3r.onrender.com/console) | Live feed, approval inbox, five editable policies, flagged calls, and AG Grid Community audit log. |
 | [`/docs`](https://airlock-2i3r.onrender.com/docs) | Python SDK quickstart, decision flow, policy YAML, audit API, and threat model. |
 
 `/` redirects to `/console`. These links identify the existing Render service; this redesign must be committed and deployed before it appears there. This implementation does not deploy it.
@@ -116,7 +116,9 @@ result = await protected_paypal(call, provenance, mock=paypal.mock)
 
 Import these classes from `firewall`. The sample's `airlock.paypal.build_paypal` constructs the existing sandbox adapter whose `execute` calls the Toolkit's actual `create_order` handler (payouts use REST); an external host supplies its own `async execute(ToolCall, request_id)` adapter. Pass `request_approval=your_async_callback` when human approval is supported. An approval-required call without a callback is denied. Close the adapter and audit store during application shutdown. The docs page includes the setup, imports, and a low-risk call.
 
-The SQLite audit is available through `GET /api/audit`. Global SSE is `GET /api/events`; the client uses `?audience=client` for a reduced projection. There are no webhook deliveries or signing guarantees in this version. There is no authentication or tenant isolation; this is a single-process sandbox application.
+The SQLite audit is available through `GET /api/audit`. Open a live-feed card or audit row to inspect `/console/events/<id>`; `GET /api/audit/<id>` returns the recorded call, five policy checks and snapshot, review details, source evidence, approval history, execution result, and related run events. Missing evidence in older records is marked unknown. The demo has no authentication, so approval records identify the sandbox console operator without claiming a verified identity.
+
+`/console/flagged` lists computed BLOCK and REQUIRE_APPROVAL decisions, including Monitor executions and later approved or denied calls. `GET /api/audit/flagged` supports `type=BLOCK|REQUIRE_APPROVAL` and `policy=<policy_id>` filters, newest-first results, and exact decimal totals grouped by currency for the filtered calls. Flagged amounts describe proposed calls, not settled funds. Global SSE is `GET /api/events`; the client uses `?audience=client` for a reduced projection. There are no webhook deliveries or signing guarantees in this version. There is no authentication or tenant isolation; this is a single-process sandbox application.
 
 ## Run locally
 

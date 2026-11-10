@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 import yaml
 from firewall import AuditStore, Firewall, Policy, RuleJudge, build_judge
 from firewall.limits import DailyLLMBudget
+from firewall.policy import POLICY_IDS
 from .limits import RunRateLimiter, client_ip
 from .agent import DemoAgent
 from .catalog import Channel3Catalog
@@ -256,11 +257,25 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
     async def resolve_approval(identifier: str,body: ApprovalChoice):
         if not approvals.resolve(identifier,body.approved):
             raise HTTPException(409,"Approval is absent or already resolved")
+        audit.record_approval(identifier, "approved" if body.approved else "denied", actor="Sandbox console operator (unauthenticated)")
         return {"id":identifier,"approved":body.approved}
 
     @app.get("/api/audit")
     async def get_audit():
         return audit.report()
+
+    @app.get("/api/audit/flagged")
+    async def get_flagged(type: Literal["BLOCK", "REQUIRE_APPROVAL"] | None = None, policy: str | None = None):
+        if policy is not None and policy not in POLICY_IDS:
+            raise HTTPException(422, "Unknown policy")
+        return audit.flagged(type, policy)
+
+    @app.get("/api/audit/{identifier}")
+    async def get_audit_event(identifier: str):
+        event = audit.event(identifier)
+        if event is None:
+            raise HTTPException(404, "Audit event not found")
+        return event
 
     # The SPA never swallows missing API routes or nonexistent static assets.
     dist = Path(settings.frontend_dist)
@@ -274,6 +289,8 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
     @app.get("/client")
     @app.get("/console")
     @app.get("/docs")
+    @app.get("/console/flagged")
+    @app.get("/console/events/{identifier}")
     async def index():
         if not (dist/"index.html").is_file():
             raise HTTPException(503,"Frontend not built. Run npm ci && npm run build in frontend/.")
