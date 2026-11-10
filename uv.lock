@@ -87,6 +87,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "channel3-sdk" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "openai" },
@@ -104,6 +105,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=2.3,<3" },
+    { name = "channel3-sdk", specifier = ">=4.9.0" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "openai", specifier = ">=1.109.1" },
@@ -328,6 +330,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/70/ea/839b50531021a647fb5e929f72cf97bc1ff702b5472166164b5b6e76b851/cffi-2.1.1-cp313-cp313-win32.whl", hash = "sha256:334644fbac4eff73d985a17a91226df55d0f394160c4cfb880e084c8f7161cac", size = 175263, upload-time = "2026-08-03T21:20:13.559Z" },
     { url = "https://files.pythonhosted.org/packages/60/a6/8b149b2c3f2e11aaa1618ef64500b45f50f22c57a977a4dff1aff1f91042/cffi-2.1.1-cp313-cp313-win_amd64.whl", hash = "sha256:1aa5645c30469b09530c4ebca77ebf8f17618293c58f8549cb1a543a50236e7d", size = 185688, upload-time = "2026-08-03T21:20:14.69Z" },
     { url = "https://files.pythonhosted.org/packages/01/9a/11f687cb39d6a3504060d5242f04f48c735afb4d3d533958a20594890cb2/cffi-2.1.1-cp313-cp313-win_arm64.whl", hash = "sha256:63bbfd5ded17c4840ac07cd8f1c21ba9d9708141f840b324f422f41b207e3973", size = 180078, upload-time = "2026-08-03T21:20:15.917Z" },
+]
+
+[[package]]
+name = "channel3-sdk"
+version = "4.9.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/65/1e/11c958b4db755db6ccb761b15665469c5c783acff107dff3705fa752252e/channel3_sdk-4.9.0.tar.gz", hash = "sha256:891d51c74f2cff8d61432f6ec11e18e8c549453a11969b75170df99089142f2a", size = 109677, upload-time = "2026-11-10T00:02:45.059Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/da/6d49878c20f3a0fa448e5b7203a6e28b3c3f68ab85952003ce5b070c97a1/channel3_sdk-4.9.0-py3-none-any.whl", hash = "sha256:cfe32bb5e91f973b059de19f2b87e383357d899ae51b782bd5e6a32def6f77f4", size = 210627, upload-time = "2026-11-10T00:02:43.513Z" },
 ]
 
 [[package]]

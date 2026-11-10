@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1,<2",
     "paypal-agent-toolkit>=1.11.0",
     "openai>=1.109.1",
+    "channel3-sdk>=4.9.0",
 ]
 
 [dependency-groups]
