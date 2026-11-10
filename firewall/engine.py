@@ -103,7 +103,8 @@ class Firewall:
                         excerpt, source = judgment.suspicious_excerpt, judgment.source
                     elif not excerpt:
                         source = judgment.source or source
-                except (Exception, asyncio.TimeoutError):
+                except (Exception, asyncio.TimeoutError) as exc:
+                    logging.getLogger(__name__).warning("Intent review failed: %s: %s", type(exc).__name__, str(exc)[:300])
                     review_failed = True
                     ai_review = "unavailable — approval required (fail-closed)"
                 review_ms = (perf_counter()-review_started)*1000

@@ -112,6 +112,8 @@ class AnthropicJudge:
                     "required":["decision","reason","suspicious_excerpt","source","score_adjustment"]}}},
             )
             text = "".join(block.text for block in response.content if block.type == "text")
+            if not text.strip():
+                raise ValueError(f"empty review text (stop_reason={getattr(response,'stop_reason',None)}, blocks={[b.type for b in response.content]})")
             payload = json.loads(text)
             required = {"decision", "reason", "score_adjustment"}
             if not isinstance(payload, dict) or not required <= payload.keys():
