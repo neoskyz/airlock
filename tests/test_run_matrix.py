@@ -477,14 +477,32 @@ def test_judge_failure_matrix(tmp_path, mode, scenario, failure, answer):
     async def check():
         async with workspace(tmp_path, mode=mode, judge_behavior=failure) as ws:
             identifier = await start(ws, Plan(scenario))
-            if mode == "Monitor":
+            if scenario == "A":
+                # A failing/hung reviewer cannot delay either clear rule result.
+                # The answer parameter is deliberately irrelevant on this path.
+                final = await settle(ws, identifier)
+                assert final["status"] == "completed" and not final["approvals"]
+                assert not ws.judge.calls
+                assert len(ws.paypal.calls) == (2 if mode == "Monitor" else 1)
+                rows = (await ws.client.get("/api/audit")).json()["rows"]
+                payout = next(row for row in rows if row["tool"] == "create_payout")
+                order = next(row for row in rows if row["tool"] == "create_order")
+                assert payout["computed_decision"] == "BLOCK" and payout["risk_score"] >= 85
+                assert payout["status"] == ("succeeded" if mode == "Monitor" else "blocked")
+                assert payout["display_decision"] == ("Would have blocked" if mode == "Monitor" else "Blocked")
+                assert order["computed_decision"] == "ALLOW" and order["status"] == "succeeded"
+                assert all(row["ai_review_detail"]["invoked"] is False and row["latency"]["ai_review_ms"] == 0 for row in (order, payout))
+                if mode == "Enforce":
+                    assert all(call.tool == "create_order" for call, _ in ws.paypal.calls)
+            elif mode == "Monitor":
                 final = await settle(ws, identifier)
                 assert not final["approvals"]
-                assert len(ws.paypal.calls) == (2 if scenario == "A" else 1)
+                assert len(ws.paypal.calls) == 1
                 rows = (await ws.client.get("/api/audit")).json()["rows"]
-                reviewed = next(row for row in rows if row["tool"] == ("create_payout" if scenario == "A" else "create_order"))
+                reviewed = next(row for row in rows if row["tool"] == "create_order")
                 assert reviewed["computed_decision"] == "REQUIRE_APPROVAL"
                 assert reviewed["status"] == "succeeded"
+                assert len(ws.judge.calls) == 1
             else:
                 pending = await wait_status(ws, identifier, "awaiting_approval")
                 await assert_views(ws, identifier, "awaiting_approval")
@@ -498,8 +516,8 @@ def test_judge_failure_matrix(tmp_path, mode, scenario, failure, answer):
                 else:
                     assert (await ws.client.post(f'/api/approvals/{approval["id"]}', json={"approved": answer == "approve"})).status_code == 200
                     final = await settle(ws, identifier, answer == "approve")
-                # Approving an injected payout still cannot override its hard risk block.
-                expected = 0 if answer == "stop" else 1 if scenario == "A" or answer == "approve" else 0
+                expected = 1 if answer == "approve" else 0
+                assert len(ws.judge.calls) == 1
                 assert len(ws.paypal.calls) == expected
                 assert all(call.tool == "create_order" for call, _ in ws.paypal.calls)
             await assert_views(ws, identifier, final["status"])

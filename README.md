@@ -15,8 +15,11 @@ flowchart LR
     Catalog[Channel3 catalog + simulated marketplace listing] --> Agent[Shopping agent]
     Agent --> Firewall[Airlock payment boundary]
     Firewall --> Rules[Five policies + risk factors]
-    Rules --> Review[Independent intent review when needed]
-    Review --> Decision[Allow / require approval / block]
+    Rules --> Fast[Low risk / high risk / hard policy: immediate decision]
+    Rules --> Review[Only scores 30–84: independent intent review]
+    Fast --> Decision[Allow / require approval / block]
+    Review --> Decision
+    Decision -. Block / approval: background only .-> Explain[AI explanation → audit + SSE]
     Decision --> PayPal[PayPal sandbox adapter]
     PayPal --> Orders[Agent Toolkit: create_order]
     PayPal --> Payouts[Payouts REST API]
@@ -25,9 +28,16 @@ flowchart LR
 ```
 
 - **Policy and risk:** single-transaction limit, period budget, merchant/payee allowlist, restricted categories, and risk thresholds. Defaults are $1,000 per call, $2,000 per UTC week, approval at 60, and block at 85. Money uses Decimal and integer cents.
-- **Selective AI review:** deterministic factors identify unknown merchants, unusual amounts, payouts, velocity, and instructions originating in tool output. Hard violations block immediately. Scores 30–84 or provenance taint trigger an independent Claude Haiku review. A four-second timeout, invalid result, or review error requires human approval in Enforce.
 - **Human control:** Enforce blocks or pauses payments; approval executes once and denial never calls PayPal. Monitor computes and audits the same decisions while allowing execution, displaying **Would have blocked** or **Would require approval**. Pending approvals reserve budget.
 - **Evidence:** audit records retain the proposed call, original decision, policy snapshot, risk factors, source excerpts, approval history, and provider ID/status. Flagged calls remain visible after approval or denial.
+
+### Risk scoring and decision latency
+
+1. **Rules fast path:** weighted factors cover unknown recipients, amount versus user budget, payment type, velocity, category, and provenance taint. With default policies, scores below 30 allow immediately; scores of 85 or more and hard policy violations block immediately. Neither path calls an LLM for the decision. Taint adds points; it does not independently trigger synchronous review. The injected $500 payout is blocked by rules, while the $19.99 charger is allowed.
+2. **Gray-zone intent review:** only scores 30–84 enter independent Claude Haiku review, with a bounded ±10 adjustment. Scores of 60 or more require approval under default policies; the unknown-merchant headphone purchase stays at 60–84 after review. A four-second timeout, invalid response, or review failure requires approval; hard policies still block. Identical reviews are cached per run. Missing review credentials or an exhausted daily budget use an explicit rules fallback.
+3. **Asynchronous explanation:** after a BLOCK or REQUIRE_APPROVAL decision is recorded, a background Claude call may add a natural-language explanation to the audit and stream it to the console. It cannot change the decision or delay payment control. The console first shows the decision latency and rule factors, then “AI explanation generating…” and the completed explanation. Failed explanations leave the factors available; missing credentials or an exhausted shared daily LLM budget skip explanation generation. Failed API attempts also count toward that budget.
+
+Most clear low-risk purchases and obvious attacks therefore avoid synchronous LLM latency. Console metrics show **Median decision latency** (p50, milliseconds, excluding approval, provider execution, and background explanation) and **AI-reviewed decisions** (the percentage of recorded payment decisions that actually attempted a synchronous LLM review, including failures; cached reviews, rules fallback, and background explanations do not count). Historical records without the relevant measurements are excluded; an empty sample displays “—”.
 
 The live shopping agent uses OpenAI Chat Completions/function calling (`gpt-4o-mini` by default); an Anthropic agent is also supported. The intent judge runs independently. Without the selected agent key, a labelled scripted simulation runs; without a judge key, rules provide the review. Live model errors never replay scripted payments.
 
@@ -85,7 +95,7 @@ Set process environment variables, or create a local `.env` from the blank `.env
 | `AIRLOCK_MODE` | `Monitor`; accepts `Monitor` or `Enforce`. |
 | `SANDBOX_STARTING_BALANCE` | `10000.00`; local ledger, not PayPal account balance. |
 | `RUN_RATE_LIMIT_PER_MINUTE`, `RUN_RATE_LIMIT_PER_HOUR` | `5`, `30` new tasks per IP. |
-| `DAILY_LLM_CALL_LIMIT` | `500` attempted agent/judge API calls per UTC day. |
+| `DAILY_LLM_CALL_LIMIT` | `500` shared attempted agent, synchronous review, and asynchronous explanation API calls per UTC day. |
 | `SQLITE_PATH`, `POLICY_PATH` | `data/audit.sqlite3`, `policies/default.yaml`. |
 
 ## Reuse the firewall
@@ -98,7 +108,7 @@ protected_paypal = guard.wrap_tool(paypal.execute)
 result = await protected_paypal(call, provenance, mock=paypal.mock)
 ```
 
-Import these classes from `firewall`. An adapter implements `async execute(ToolCall, request_id)`. Pass `request_approval=your_async_callback` to support approvals; without a callback, approval-required calls are denied. See [`/docs`](https://airlock-2i3r.onrender.com/docs) for setup, imports, and lifecycle cleanup.
+Import these classes from `firewall`. An adapter implements `async execute(ToolCall, request_id)`. Pass `request_approval=your_async_callback` to support approvals; without a callback, approval-required calls are denied. During shutdown, `await guard.close()` before closing the audit store to cancel pending background explanations; `await guard.drain_explanations()` waits for them when needed. See [`/docs`](https://airlock-2i3r.onrender.com/docs) for setup, imports, and lifecycle cleanup.
 
 `GET /api/audit`, `GET /api/audit/<id>`, and `GET /api/audit/flagged` expose records; `GET /api/events` streams updates. The client uses `?audience=client` to omit security evidence. Webhooks are not implemented.
 

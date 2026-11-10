@@ -44,10 +44,12 @@ def test_event_detail_records_call_five_policy_snapshot_review_evidence_and_run_
         assert checks["single_transaction"]["outcome"] == "pass"
         assert checks["risk_threshold"]["outcome"] == "fail"
         review = event["ai_review_detail"]
-        assert review["invoked"] and not review["model_invoked"] and review["reviewer"] == "rules"
-        assert review["status"] == "completed" and review["decision"] == "BLOCK"
-        assert review["reason"] and review["latency_ms"] >= 0
-        source = next(source for source in event["provenance"] if source["id"] == event["source"])
+        assert not review["invoked"] and not review["model_invoked"] and review["reviewer"] is None
+        assert review["status"] == "skipped" and review["decision"] is None
+        assert review["reason"] and review["latency_ms"] == 0
+        assert event["ai_explanation"]["status"] == "skipped_no_model"
+        assert event["latency"]["decision_ms"] >= 0
+        source = next(source for source in event["provenance"] if source["id"] in event["source"])
         assert event["suspicious_excerpt"] in source["text"]
         assert event["execution_result"]["id"] == event["paypal_id"]
         assert "MOCK" in event["paypal_id"] and event["paypal_status"] == "PENDING"

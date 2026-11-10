@@ -77,6 +77,7 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
         for task in list(tasks):
             task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
+        await firewall.close()
         await paypal.close()
         await catalog.close()
         audit.close()
@@ -203,6 +204,7 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
         if approvals.pending:
             raise HTTPException(409, "Pending payment cleanup must finish before resetting sandbox data")
         # No await in the check/reset section: a new run cannot interleave.
+        firewall.cancel_explanations()
         audit.reset_sandbox_data()
         runs.clear()
         run_tasks.clear()

@@ -61,6 +61,7 @@ class Latency(BaseModel):
     rules_ms: float = 0
     ai_review_ms: float = 0
     total_ms: float = 0
+    decision_ms: float | None = None
 
 
 class Verdict(BaseModel):

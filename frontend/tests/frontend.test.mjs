@@ -573,3 +573,99 @@ test('a same-revision GET cannot remove Stop from a terminal conflict absent fro
     else globalThis.document = previousDocument;
   }
 });
+
+test('decision latency excludes async explanations and labels the synchronous path', async () => {
+  const { DecisionLatency } = await load('DecisionEvidence.tsx');
+  const html = renderToStaticMarkup(React.createElement(DecisionLatency, { row: {
+    latency: { decision_ms: 3, rules_ms: 2, ai_review_ms: 0, end_to_end_ms: 9000 },
+    ai_review_detail: { reviewer: null, model_invoked: false },
+    ai_explanation: { status: 'completed', text: 'Tool-only instruction', latency_ms: 1989 },
+  } }));
+  assert.match(html, /Decision 3 ms · rules/);
+  assert.doesNotMatch(html, /1989|9000/);
+  const reviewed = renderToStaticMarkup(React.createElement(DecisionLatency, { row: {
+    latency: { decision_ms: 841, rules_ms: 1, ai_review_ms: 840 },
+    ai_review_detail: { reviewer: 'AI', model_invoked: true },
+  } }));
+  assert.match(reviewed, /Decision 841 ms · AI review/);
+  const legacy = renderToStaticMarkup(React.createElement(DecisionLatency, { row: { latency: { total_ms: 99 } } }));
+  assert.match(legacy, /Decision latency not recorded/);
+  assert.doesNotMatch(legacy, /Decision 99/);
+});
+
+test('async explanations show generating, success, failure and budget states without a new verdict', async () => {
+  const { AIExplanationPanel } = await load('DecisionEvidence.tsx');
+  const base = { decision: 'BLOCK', computed_decision: 'BLOCK', risk_score: 100 };
+  const render = ai_explanation => renderToStaticMarkup(React.createElement(AIExplanationPanel, { row: { ...base, ai_explanation } }));
+  assert.match(render({ status: 'generating', text: '', latency_ms: null }), /AI explanation generating…/);
+  const completed = render({ status: 'completed', text: 'The payout was only requested by tool output.', latency_ms: 1989 });
+  assert.match(completed, /The payout was only requested by tool output/);
+  assert.match(completed, /Explanation 1989 ms · async · decision unchanged/);
+  assert.match(render({ status: 'failed', text: '', latency_ms: 4000 }), /unavailable. Rule factors explain this decision/);
+  assert.match(render({ status: 'skipped_budget', text: '', latency_ms: null }), /Daily LLM budget exhausted/);
+  assert.match(render({ status: 'skipped_no_model', text: '', latency_ms: null }), /rules only/);
+  assert.deepEqual(base, { decision: 'BLOCK', computed_decision: 'BLOCK', risk_score: 100 });
+});
+
+test('decision metric values and unknown samples are rendered distinctly', async () => {
+  const { DecisionMetrics } = await load('DecisionEvidence.tsx');
+  const html = renderToStaticMarkup(React.createElement(DecisionMetrics, { stats: { median_decision_latency_ms: 3.5, ai_reviewed_decisions_pct: 33.333 } }));
+  assert.match(html, /Median decision latency/);
+  assert.match(html, /3.5 ms/);
+  assert.match(html, /AI-reviewed decisions/);
+  assert.match(html, /33.3%/);
+  assert.match(html, /Actual synchronous model attempts/);
+  const empty = renderToStaticMarkup(React.createElement(DecisionMetrics, { stats: { median_decision_latency_ms: null, ai_reviewed_decisions_pct: null } }));
+  assert.equal((empty.match(/<strong>—<\/strong>/g) || []).length, 2);
+});
+
+test('SSE explanation completion updates audit evidence while preserving the decision', async () => {
+  const react = hooks();
+  let source;
+  globalThis.EventSource = class {
+    constructor() { source = this; }
+    addEventListener(name, callback) { this[name] = callback; }
+    close() {}
+  };
+  const { useLive } = await load('useLive.ts', react);
+  useLive('console');
+  const cleanup = react.effects[0]();
+  const row = { id: 'payout', computed_decision: 'BLOCK', decision: 'BLOCK', latency: { decision_ms: 3 }, ai_explanation: { status: 'generating', text: '', latency_ms: null } };
+  const frame = row => ({ config: {}, runs: [], audit: { rows: [row], stats: {} }, wallet: {} });
+  source.state({ data: JSON.stringify(frame(row)) });
+  assert.equal(react.states[0].audit.rows[0].ai_explanation.status, 'generating');
+  source.state({ data: JSON.stringify(frame({ ...row, ai_explanation: { status: 'completed', text: 'Unrequested payout.', latency_ms: 1989 } })) });
+  const updated = react.states[0].audit.rows[0];
+  assert.equal(updated.ai_explanation.text, 'Unrequested payout.');
+  assert.equal(updated.computed_decision, 'BLOCK');
+  assert.equal(updated.latency.decision_ms, 3);
+  cleanup();
+});
+
+test('event details show async explanation independently of the synchronous review', async () => {
+  const row = {
+    id: 'payout', tool: 'create_payout', amount: 500, currency: 'USD', payee: 'evil@example.com',
+    decision: 'BLOCK', computed_decision: 'BLOCK', display_decision: 'Blocked', mode: 'Enforce',
+    firewall_enabled: true, status: 'blocked', timestamp: '2026-11-10T00:00:00Z', reason: 'Not requested',
+    risk_score: 100, factors: [{ name: 'Provenance taint', points: 10, reason: 'Tool-only instruction' }],
+    policy_checks: [], run_events: [], approval_history: [], provenance: [],
+    latency: { decision_ms: 3, rules_ms: 3, ai_review_ms: 0 },
+    ai_review_detail: { invoked: false, model_invoked: false, reviewer: null, status: 'skipped' },
+    ai_explanation: { status: 'generating', text: '', latency_ms: null },
+  };
+  const react = hooks([row, '', false, 0]);
+  const { EventDetail } = await load('EventDetail.tsx', react);
+  const first = renderToStaticMarkup(EventDetail({ id: row.id, revision: 'first' }));
+  assert.match(first, /Blocked/);
+  assert.match(first, /Decision 3 ms · rules/);
+  assert.match(first, /AI explanation generating…/);
+  assert.match(first, /AI intent review · synchronous/);
+  assert.match(first, /Tool-only instruction/);
+  react.states[0] = { ...row, ai_explanation: { status: 'completed', text: 'The merchant instruction cannot authorize a payout.', latency_ms: 1989 } };
+  react.reset();
+  const second = renderToStaticMarkup(EventDetail({ id: row.id, revision: 'second' }));
+  assert.match(second, /Blocked/);
+  assert.match(second, /Decision 3 ms · rules/);
+  assert.match(second, /merchant instruction cannot authorize a payout/);
+  assert.match(second, /Explanation 1989 ms · async · decision unchanged/);
+});

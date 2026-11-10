@@ -32,8 +32,11 @@ export interface Product {
   category?: string;
 }
 export interface RiskFactor { name: string; points: number; reason: string }
-export interface Latency { rules_ms: number; ai_review_ms: number; total_ms?: number; approval_ms?: number; execution_ms?: number; end_to_end_ms?: number }
+export interface AIExplanation { status: 'generating' | 'completed' | 'failed' | 'skipped_budget' | 'skipped_no_model'; text: string; latency_ms: number | null }
+export interface Latency { decision_ms?: number | null; rules_ms: number; ai_review_ms: number; total_ms?: number; approval_ms?: number; execution_ms?: number; end_to_end_ms?: number }
 export interface Explainable {
+  ai_explanation?: AIExplanation | null;
+  ai_review_detail?: ReviewDetail | null;
   risk_score?: number | null;
   factors?: RiskFactor[] | null;
   latency?: Latency | null;
@@ -160,7 +163,7 @@ export interface FlaggedAudit {
 }
 export interface Audit {
   rows: AuditRow[];
-  stats: { blocked_amount: number | string; allowed_amount: number | string };
+  stats: { blocked_amount: number | string; allowed_amount: number | string; median_decision_latency_ms?: number | null; ai_reviewed_decisions_pct?: number | null; decision_latency_samples?: number; ai_reviewed_decision_samples?: number };
 }
 export interface Wallet { balance: string | number; currency: string; label: string; source: string; paypal_mode?: string }
 export interface LiveState { config: Config; runs: Run[]; audit: Audit; wallet: Wallet }

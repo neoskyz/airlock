@@ -41,7 +41,7 @@ def test_factor_decomposition_and_call_specific_taint():
     audit.close()
 
 
-def test_low_risk_skips_llm_but_gray_and_tainted_calls_review():
+def test_low_and_high_risk_skip_llm_but_gray_calls_review():
     async def scenario():
         judge = SimpleNamespace(mode="anthropic", judge=AsyncMock(return_value=Verdict(decision=Decision.ALLOW, reason="Matches intent")))
         firewall, audit = setup(judge)
@@ -53,10 +53,11 @@ def test_low_risk_skips_llm_but_gray_and_tainted_calls_review():
         assert judge.judge.await_count == 1
         p = Provenance("Buy me a USB-C charger under $40");p.add_tool("merchant page", INJECTION)
         await firewall.invoke(attack(), p, execute)
-        assert judge.judge.await_count == 2
+        assert judge.judge.await_count == 1
         row = audit.report()["rows"][0]
+        assert row["ai_review"] == "skipped (high risk)"
         assert row["risk_score"] == 92 and row["decision"] == "BLOCK"
-        assert set(row["latency"]) == {"rules_ms", "ai_review_ms", "total_ms", "end_to_end_ms"}
+        assert set(row["latency"]) == {"rules_ms", "ai_review_ms", "total_ms", "decision_ms", "end_to_end_ms"}
         assert row["latency"]["end_to_end_ms"] >= row["latency"]["total_ms"]
         audit.close()
     asyncio.run(scenario())
@@ -112,7 +113,8 @@ def test_monitor_records_block_and_approval_without_intercepting():
         rows = audit.report()["rows"]
         assert {r["computed_decision"] for r in rows} == {"BLOCK", "REQUIRE_APPROVAL"}
         assert all(r["enforced_decision"] == "ALLOW" and r["status"] == "succeeded" for r in rows)
-        assert audit.report()["stats"] == {"blocked_amount":0,"allowed_amount":749.99}
+        assert audit.report()["stats"]["blocked_amount"] == 0
+        assert audit.report()["stats"]["allowed_amount"] == 749.99
         audit.close()
     asyncio.run(scenario())
 
@@ -183,7 +185,7 @@ def test_sdk_wrapper_runs_same_firewall_boundary():
 
 
 @pytest.mark.parametrize("broken_result", ["timeout", "malformed"])
-def test_high_score_tainted_review_failure_requires_approval(broken_result):
+def test_high_score_tainted_never_waits_for_broken_review(broken_result):
     async def scenario():
         async def broken(*args):
             if broken_result == "timeout":
@@ -198,14 +200,14 @@ def test_high_score_tainted_review_failure_requires_approval(broken_result):
             return False
         p = Provenance("Buy me a USB-C charger under $40");p.add_tool("merchant page",INJECTION)
         result = await firewall.invoke(attack(),p,executor,request_approval=deny)
-        assert result["status"] == "denied"
-        assert len(seen) == 1 and seen[0].decision == Decision.REQUIRE_APPROVAL
-        assert seen[0].risk_score == 92
+        assert result["status"] == "blocked"
+        assert not seen
+        assert audit.report()["rows"][0]["ai_review"] == "skipped (high risk)"
         executor.assert_not_awaited()
         # Hard policies still win and never enter the failed review path.
         firewall.policy.single_transaction_limit = Decimal("100")
         result = await firewall.invoke(attack(),p,executor,request_approval=deny)
-        assert result["status"] == "blocked" and len(seen) == 1
+        assert result["status"] == "blocked" and not seen
         audit.close()
     asyncio.run(scenario())
 

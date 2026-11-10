@@ -3598,3 +3598,40 @@ i {
 
 .task-status-notice { display: flex; align-items: flex-start; flex-direction: column; gap: 10px; }
 .task-status-notice strong { font-weight: 600; }
+
+.decision-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: -12px 0 28px;
+}
+.decision-metrics>div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
+  padding: 16px 20px;
+  border: 1px solid #293447;
+  border-radius: 8px;
+  background: #131b26;
+}
+.decision-metrics span { color: #b7c4d7; font-size: 15px; }
+.decision-metrics strong { margin-left: auto; font-size: 23px; font-weight: 500; }
+.decision-metrics small { width: 100%; color: #8d9bb0; font-size: 12px; }
+.ai-explanation {
+  padding: 14px 16px;
+  border: 1px solid #33445e;
+  border-radius: 7px;
+  background: #152132;
+  margin: 10px 0;
+}
+.explanation-label { font-size: 13px; color: #aec6e6; font-weight: 500; }
+.ai-explanation p { margin: 7px 0; line-height: 1.65; font-size: 15px; color: #c1cddd; }
+.ai-explanation small { color: #8d9bb0; font-size: 12px; }
+.feed-card-context .feed-rule-reasons { margin: 5px 0; color: #b7c4d7; font-size: 13px; line-height: 1.7; }
+.decision-flow { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 760px) {
+  .decision-metrics { grid-template-columns: 1fr; gap: 10px; }
+  .decision-flow { grid-template-columns: 1fr; }
+  .decision-flow>div { border-right: 0; border-bottom: 1px solid #31455e; }
+}

@@ -12,6 +12,7 @@ import { Icon, Badge, Connection, ErrorBanner, type IconName } from './ui';
 import { Policies } from './Policies';
 import { Docs } from './Docs';
 import { AuditLogBoundary } from './AuditLogBoundary';
+import { AIExplanationPanel, DecisionLatency, DecisionMetrics } from './DecisionEvidence';
 const AuditLog = lazy(() => import('./AuditLog'));
 const purchase = 'Buy me the cheapest 65W USB-C charger under $40';
 const headphones = 'Buy me noise-cancelling headphones under $300';
@@ -278,15 +279,6 @@ function Factors({
     </div>)}
   </div>;
 }
-function LatencyLine({
-  row
-}: {
-  row: Explainable;
-}) {
-  return <span className="latency-line">rules {Math.round(row.latency?.rules_ms || 0)} ms<span>·</span>AI review {row.ai_review?.includes('skip') ? neutral(row.ai_review) : `${Math.round(row.latency?.ai_review_ms || 0)} ms`}{row.ai_review && !row.ai_review.includes('skip') && <span className="latency-note">
-      {neutral(row.ai_review)}
-    </span>}</span>;
-}
 function ExecutionStatus({
   row
 }: {
@@ -352,7 +344,9 @@ function FeedCard({
       <span>
         {neutral(row.reason)}
       </span>
-      <LatencyLine row={row} />
+      <DecisionLatency row={row} />
+      {['BLOCK', 'REQUIRE_APPROVAL'].includes(row.computed_decision || row.decision) && <p className="feed-rule-reasons">Rules: {(row.factors || []).filter(factor => factor.points > 0).map(factor => neutral(factor.reason)).join(' · ') || neutral(row.reason)}</p>}
+      <AIExplanationPanel row={row} />
       <ExecutionStatus row={row} />
       <ConsoleLink className="event-link" href={eventPath(row.id)}>View event details →</ConsoleLink>
     </div>
@@ -765,6 +759,7 @@ export function Console() {
               <small>Human review before execution</small>
             </div>
           </div>
+          <DecisionMetrics stats={audit.stats} />
           <div className="feed-section-heading">
             <h2>Recent tool calls<span>
                 {feedRows.length}

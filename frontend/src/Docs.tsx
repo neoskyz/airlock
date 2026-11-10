@@ -95,31 +95,34 @@ export function Docs() {
             <Icon name="docs" size={19} />
             <p><code>build_paypal</code> is this application's sandbox adapter. Its order executor calls the real PayPal Agent Toolkit <code>create_order</code> handler; payouts use REST. An external host supplies its own <code>async execute(ToolCall, request_id)</code> adapter.</p>
           </div>
-          <p>Pass <code>request_approval=your_async_callback</code> when human approval is supported. Without a callback, approval-required calls are denied. Close the payment adapter and audit store during application shutdown. Missing credentials select the explicit MOCK adapter. This example uses the rules fallback; provide your independent review key to enable AI intent review.</p>
+          <p>Pass <code>request_approval=your_async_callback</code> when human approval is supported. Without a callback, approval-required calls are denied. Await <code>guard.drain_explanations()</code> to finish pending explanations, or <code>guard.close()</code> to cancel them, before closing the payment adapter and audit store during application shutdown. Missing credentials select the explicit MOCK adapter. This example uses the rules fallback; provide your independent review key to enable AI intent review.</p>
         </section>
         <section id="decisions">
           <span className="eyebrow">DECISION PIPELINE</span>
           <h2>How decisions work</h2>
-          <p>Hard limits run first. Remaining calls receive a deterministic score; ambiguous or tainted requests receive an independent AI intent review.</p>
+          <p>Rules make clear low-risk and high-risk decisions immediately. Only gray-zone calls wait for AI intent review. Flagged decisions can receive a supplementary AI explanation afterward.</p>
           <div className="decision-flow">
-            {['Rules', 'Risk score', 'AI review', 'Decision'].map((name, index) => <div key={name}>
+            {['Fast decision', 'Gray-zone review', 'Async explanation'].map((name, index) => <div key={name}>
               <span>0{index + 1}</span>
               <strong>
                 {name}
               </strong>
               <p>
-                {['Amount, budget, category', 'Weighted, visible factors', 'Gray zone or taint', 'Allow, approve, block'][index]}
+                {['Rules allow or block immediately', 'Only scores 30–84 wait for AI', 'Supplement after the decision'][index]}
               </p>
             </div>)}
           </div>
           <h3>Fast path</h3>
-          <p>Recipient trust, amount against the user's budget, amount against the automatic approval reference, payout versus purchase, velocity, provenance taint, and category contribute visible points.</p>
+          <p>Recipient trust, amount against the user's budget, amount against the automatic approval reference, payout versus purchase, velocity, provenance taint, and category contribute visible points. Scores below 30 allow immediately; scores of 85 or above and hard policy violations block immediately. These decisions make no synchronous model call. Taint adds risk points; it does not independently trigger review.</p>
           <h3>Selective intent review</h3>
-          <p>Scores from 30 to 84, or provenance taint, trigger a review. Clear low-risk calls skip it. Reviews raise or lower risk within bounds, and identical reviews are cached within a run. Hard policy violations short-circuit before review.</p>
+          <p>Only scores from 30 to 84 trigger synchronous intent review. Reviews raise or lower risk within bounds, and identical reviews are cached within a run. Headphone purchases from an unknown merchant retain an approval score of 60–84. Most clear transactions avoid model latency and cost; the $500 injected payout is blocked by rules, while the $19.99 charger is allowed by rules.</p>
           <div className="docs-callout">
             <strong>Fail closed on review timeout</strong>
             <p>Review errors, invalid responses, and a four-second timeout require human approval. The payment stays paused in Enforce until approved or denied.</p>
           </div>
+          <h3>AI explanation · asynchronous</h3>
+          <p>After a BLOCK or REQUIRE_APPROVAL decision is recorded, a background model call can add a natural-language explanation. It cannot change the decision, risk score, or payment result. Rule factors remain available while the explanation generates or if it fails. Explanations share the daily LLM budget with agents and intent reviews; when the budget is exhausted or no review model is configured, only the rule factors are shown.</p>
+          <p>The console separates decision latency from explanation time. Median decision latency measures recorded decision samples; AI-reviewed decisions measures actual synchronous model attempts, including failed attempts and excluding cached reviews, rules fallback, and asynchronous explanations. Older events without these measurements are excluded.</p>
           <h3>Monitor and Enforce</h3>
           <p><strong>Monitor</strong> computes and records decisions while allowing tool execution. <strong>Enforce</strong> blocks rejected calls and pauses requests requiring approval. Every call retains the mode used for evaluation.</p>
         </section>

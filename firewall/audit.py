@@ -1,4 +1,6 @@
 import json
+import math
+from statistics import median
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -31,6 +33,12 @@ class AuditStore:
             self.record_approval(row["id"], "cancelled", actor="System (server restart)")
         self.connection.execute("UPDATE audit SET decision='BLOCK', status='cancelled', reason=reason || '; server restarted before approval' WHERE status='awaiting_approval'")
         self.connection.execute("UPDATE audit SET status='unknown' WHERE status='executing'")
+        # Explanation tasks are process-local; a restart cannot resume them.
+        for row in self.connection.execute("SELECT id, metadata FROM audit").fetchall():
+            metadata = json.loads(row["metadata"])
+            explanation = metadata.get("ai_explanation")
+            if isinstance(explanation, dict) and explanation.get("status") == "generating":
+                self.update_metadata(row["id"], ai_explanation={**explanation, "status":"failed", "text":""})
         self.connection.commit()
 
     def reserve_total(self, period="daily") -> Decimal:
@@ -105,7 +113,7 @@ class AuditStore:
         defaults = {"risk_score":None, "factors":[], "latency":None,
             "ai_review":"not recorded", "policy":"", "mode":"Enforce" if row["firewall_enabled"] else "Monitor",
             "computed_decision":row["decision"], "category":"", "description":None, "product_id":"",
-            "call":None, "policy_snapshot":None, "ai_review_detail":None, "approval_history":[], "execution_result":None}
+            "call":None, "policy_snapshot":None, "ai_review_detail":None, "ai_explanation":None, "approval_history":[], "execution_result":None}
         for key, default in defaults.items():
             row.setdefault(key, default)
         if "policy_checks" not in row:
@@ -123,7 +131,23 @@ class AuditStore:
         rows = [self._serialize(stored) for stored in self.connection.execute("SELECT * FROM audit ORDER BY timestamp DESC, id DESC")]
         blocked = sum((Decimal(str(row["amount"])) for row in rows if row["status"] in {"blocked", "denied"}), Decimal(0))
         allowed = sum((Decimal(str(row["amount"])) for row in rows if row["status"] == "succeeded"), Decimal(0))
-        return {"rows":rows, "stats":{"blocked_amount":float(blocked), "allowed_amount":float(allowed)}}
+        payments = [row for row in rows if row["tool"] in {"create_order", "create_payout"}]
+        # Historical end-to-end timings include approval/provider work. Only
+        # explicitly recorded decision timings belong in this metric.
+        latencies = [(row.get("latency") or {}).get("decision_ms") for row in payments]
+        latencies = [value for value in latencies
+                     if type(value) in (int, float) and math.isfinite(value) and value >= 0]
+        # Unknown legacy review evidence is excluded instead of counted as a
+        # skipped model call. Cached reviews and rules fallbacks are false;
+        # async explanations never change this synchronous review marker.
+        reviews = [(row.get("ai_review_detail") or {}).get("model_invoked") for row in payments]
+        reviews = [value for value in reviews if type(value) is bool]
+        return {"rows":rows, "stats":{
+            "blocked_amount":float(blocked), "allowed_amount":float(allowed),
+            "median_decision_latency_ms":round(median(latencies), 2) if latencies else None,
+            "ai_reviewed_decisions_pct":round(100 * sum(reviews) / len(reviews), 2) if reviews else None,
+            "decision_latency_samples":len(latencies), "ai_reviewed_decision_samples":len(reviews),
+        }}
 
     def event(self, identifier):
         stored = self.connection.execute("SELECT * FROM audit WHERE id=?", (identifier,)).fetchone()

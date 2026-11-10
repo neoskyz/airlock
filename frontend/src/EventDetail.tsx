@@ -3,6 +3,7 @@ import { ApiError, request } from './api';
 import type { AuditEvent, AuditRow } from './types';
 import { ConsoleLink, eventDate, eventMoney, eventPath, policyNames } from './consoleNavigation';
 import './consoleEvents.css';
+import { AIExplanationPanel, DecisionLatency } from './DecisionEvidence';
 export function EventDecision({
   row
 }: {
@@ -218,7 +219,7 @@ export function EventDetail({
       </section>
       <div className="event-two-column">
         <section className="event-panel">
-          <h2>AI intent review</h2>
+          <h2>AI intent review · synchronous</h2>
           <dl className="event-fields">
             <Field label="Review invoked">
               {yesNo(review?.invoked)}
@@ -252,15 +253,19 @@ export function EventDetail({
         </section>
         <section className="event-panel">
           <h2>Stage latency</h2>
+          <DecisionLatency row={current} />
           <dl className="event-fields">
             <Field label="Rules">
               {millis(current.latency?.rules_ms)}
             </Field>
-            <Field label="AI review">
+            <Field label="AI review (synchronous)">
               {millis(current.latency?.ai_review_ms)}
             </Field>
-            <Field label="Decision total">
-              {millis(current.latency?.total_ms)}
+            <Field label="Decision latency">
+              {millis(current.latency?.decision_ms)}
+            </Field>
+            <Field label="Explanation (async)">
+              {millis(current.ai_explanation?.latency_ms)}
             </Field>
             <Field label="Approval wait">
               {millis(current.latency?.approval_ms)}
@@ -274,6 +279,7 @@ export function EventDetail({
           </dl>
         </section>
       </div>
+      <AIExplanationPanel row={current} />
       <section className="event-panel">
         <h2>Provenance evidence</h2>
         <p className="event-muted">Original user instructions and untrusted tool output retain their recorded sources.</p>

@@ -49,7 +49,12 @@ def test_all_demo_scenarios_and_approval_single_consumption(tmp_path):
             assert payout["status"] == expected_status
             assert payout["display_decision"] == ("Would have blocked" if run_id == disabled else "Blocked")
         assert len([row for row in payments if row["run_id"] == headphones]) == 1
-        assert audit["stats"]=={"blocked_amount":500,"allowed_amount":789.97}
+        assert audit["stats"]["blocked_amount"] == 500
+        assert audit["stats"]["allowed_amount"] == 789.97
+        assert audit["stats"]["median_decision_latency_ms"] >= 0
+        assert audit["stats"]["ai_reviewed_decisions_pct"] == 0
+        assert audit["stats"]["decision_latency_samples"] == 5
+        assert audit["stats"]["ai_reviewed_decision_samples"] == 5
         assert all(row["mock"] for row in audit["rows"] if row["tool"] in {"create_order", "create_payout"})
 
 
@@ -304,7 +309,9 @@ def test_sandbox_reset_requires_confirmation_and_clears_only_local_demo_data(tmp
         assert response.status_code == 200
         assert "not reversed" in response.json()["message"]
         assert response.json()["wallet"]["balance"] == "10000.00"
-        assert client.get("/api/audit").json() == {"rows":[],"stats":{"blocked_amount":0,"allowed_amount":0}}
+        assert client.get("/api/audit").json() == {"rows":[],"stats":{
+            "blocked_amount":0, "allowed_amount":0, "median_decision_latency_ms":None,
+            "ai_reviewed_decisions_pct":None, "decision_latency_samples":0, "ai_reviewed_decision_samples":0}}
         assert client.get(f"/api/runs/{identifier}").status_code == 404
         assert app.state.audit.reserve_total("weekly") == 0
         assert app.state.runs == {} and app.state.firewall._reviews == {}

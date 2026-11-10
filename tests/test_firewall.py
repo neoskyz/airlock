@@ -22,7 +22,8 @@ def test_attack_block_and_bypass_are_audited():
         assert (await firewall.invoke(call,p,execute,enabled=False))["id"] == "MOCK-PAYOUT"
         execute.assert_awaited_once()
         report=store.report()
-        assert report["stats"] == {"blocked_amount":500,"allowed_amount":500}
+        assert report["stats"]["blocked_amount"] == 500
+        assert report["stats"]["allowed_amount"] == 500
         assert len(report["rows"]) == 2
         store.close()
     asyncio.run(scenario())
