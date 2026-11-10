@@ -6,7 +6,7 @@
 
 A reusable payment firewall that checks an AI agent's intent, policy, and input provenance before it calls PayPal.
 
-Built for the PayPal AI Hackathon. The sole product scope is the [2:30 demo script](docs/demo_script.md): an injected shopping page, payment protection, human approval, and an AG Grid audit trail.
+Built for the PayPal AI Hackathon: an injected shopping page, payment protection, human approval, and an AG Grid audit trail.
 
 **Powered by PayPal Agent Toolkit** (`paypal-agent-toolkit` 1.11.0, bottom-level order tool).
 
@@ -136,9 +136,8 @@ uv run pytest
 make build
 ```
 
-Tests use mocked clients and HTTP transports, never real PayPal, OpenAI, or Anthropic requests. GitLab CI (`.gitlab-ci.yml`) installs locked Python dependencies with uv, runs pytest, and builds the frontend with Node.js 22 and `npm ci`. See [docs/todo.md](docs/todo.md) for outstanding sandbox verification, hosting, and video work.
+Tests use mocked clients and HTTP transports, never real PayPal, OpenAI, or Anthropic requests. GitLab CI (`.gitlab-ci.yml`) installs locked Python dependencies with uv, runs pytest, and builds the frontend with Node.js 22 and `npm ci`.
 
-The existing Python 3.13 environment and installed frontend dependencies support offline tests and builds. Dependency locks are already present; this change does not regenerate them. Clean installation, real API access, browser interaction, and deployment remain separate from those checks. See [validation notes](docs/validation.md) for the exact verified scope.
 
 ## Deploy one Render service
 

@@ -14,3 +14,9 @@ dist/
 .uv-cache/
 data/
 .DS_Store
+
+# Internal notes, not published
+docs/
+CLAUDE.md
+.vscode/
+*.tsbuildinfo
