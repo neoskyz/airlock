@@ -82,6 +82,17 @@ class SandboxPayPal:
         self._expires = time.monotonic() + max(0, int(body.get("expires_in", 300)) - 30)
         return self._token
 
+    async def balance(self):
+        """Available USD balance of the sandbox account, or None if the app lacks the reporting scope."""
+        token = await self._access_token()
+        response = await self.client.get("/v1/reporting/balances", params={"currency_code": "USD"}, headers={"Authorization": f"Bearer {token}"})
+        if response.status_code != 200:
+            return None
+        for item in response.json().get("balances", []):
+            if item.get("currency") == "USD":
+                return Decimal(str(item["available_balance"]["value"]))
+        return None
+
     async def _post(self, uri, payload, request_id):
         token = await self._access_token()
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "PayPal-Request-Id": request_id}

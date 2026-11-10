@@ -148,11 +148,32 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
         policy = firewall.policy = updated
         return after
 
-    def wallet_snapshot():
+    wallet_baseline = {"balance": None, "spent_at_fetch": Decimal(0), "tried": False}
+
+    def ledger_spent():
         # Ledger movement reflects accepted calls/created orders, not settlement.
         rows = audit.report()["rows"]
-        amount = sum((Decimal(str(row["amount"])) for row in rows if row["status"] == "succeeded" and row["tool"] in {"create_order", "create_payout"}), Decimal(0))
-        return {"balance":f"{settings.sandbox_starting_balance-amount:.2f}", "currency":"USD", "label":"Sandbox · local balance", "source":"local_ledger", "starting_balance":f"{settings.sandbox_starting_balance:.2f}", "paypal_mode":paypal.mode}
+        return sum((Decimal(str(row["amount"])) for row in rows if row["status"] == "succeeded" and row["tool"] in {"create_order", "create_payout"}), Decimal(0))
+
+    async def refresh_wallet_baseline():
+        wallet_baseline["tried"] = True
+        fetch = getattr(paypal, "balance", None)
+        if fetch is None:
+            return
+        try:
+            real = await fetch()
+        except Exception:
+            real = None
+        if real is not None:
+            wallet_baseline.update(balance=real, spent_at_fetch=ledger_spent())
+
+    def wallet_snapshot():
+        spent = ledger_spent()
+        if wallet_baseline["balance"] is not None:
+            # Real PayPal balance at the last refresh, minus payments accepted since (PayPal's reporting API lags).
+            balance = wallet_baseline["balance"] - (spent - wallet_baseline["spent_at_fetch"])
+            return {"balance":f"{balance:.2f}", "currency":"USD", "label":"PayPal sandbox balance", "source":"paypal", "starting_balance":f"{wallet_baseline['balance']:.2f}", "paypal_mode":paypal.mode}
+        return {"balance":f"{settings.sandbox_starting_balance-spent:.2f}", "currency":"USD", "label":"Sandbox · local balance", "source":"local_ledger", "starting_balance":f"{settings.sandbox_starting_balance:.2f}", "paypal_mode":paypal.mode}
 
     @app.post("/api/sandbox/reset")
     async def reset_sandbox_data(body: ResetSandboxData):
@@ -164,13 +185,18 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
         run_tasks.clear()
         approvals.pending.clear()
         firewall._reviews.clear()
+        await refresh_wallet_baseline()
         return {"status":"reset", "message":"Local sandbox data reset. PayPal sandbox orders and payouts are not reversed.", "wallet":wallet_snapshot()}
 
     @app.get("/api/wallet")
     async def get_wallet():
+        if not wallet_baseline["tried"]:
+            await refresh_wallet_baseline()
         return wallet_snapshot()
 
     async def state_snapshot(audience="console"):
+        if not wallet_baseline["tried"]:
+            await refresh_wallet_baseline()
         full_config = await config()
         if audience == "client":
             full_config = {key:value for key,value in full_config.items() if key in {"paypal_mode", "demo_mode", "llm_degraded", "version"}}
