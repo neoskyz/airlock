@@ -29,7 +29,16 @@ def fixture_image(kind="charger"):
     return "data:image/svg+xml," + quote(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 210"><rect width="280" height="210" rx="16" fill="#283140"/>{shape}</svg>')
 
 
-def fixture_catalog():
+def charger_query(query):
+    return bool(re.search(r"\b(?:chargers?|usb[\s-]?c|gan|power\s+adapters?)\b", query, re.IGNORECASE))
+
+
+def fixture_catalog(query="charger"):
+    if re.search(r"\bheadphones?\b", query, re.IGNORECASE):
+        return [
+            {"id":"fixture-sony-headphones", "name":"Sony WH-1000XM4 Wireless Noise-Cancelling Headphones", "price":"249.99", "merchant":"sony.com", "description":"Wireless over-ear headphones with active noise cancellation, 30-hour battery life and multipoint Bluetooth.", "url":"https://electronics.sony.com/audio/headphones/headband/p/wh1000xm4-b", "category":"electronics-headphones", "image":fixture_image("headphones")},
+            {"id":"fixture-bose-headphones", "name":"Bose QuietComfort Wireless Noise-Cancelling Headphones", "price":"279.00", "merchant":"bose.com", "description":"Comfortable over-ear wireless headphones with adjustable active noise cancellation.", "url":"https://www.bose.com/p/headphones/bose-quietcomfort-headphones/QC-HEADPHONEARN.html", "category":"electronics-headphones", "image":fixture_image("headphones")},
+        ]
     return [
         {"id":"fixture-anker-30w", "name":"Anker Nano USB-C Charger 30W", "price":"24.99", "merchant":"anker.com", "description":"Compact GaN USB-C wall charger with foldable pins and 30W Power Delivery.", "url":"https://www.anker.com/", "category":"electronics", "image":fixture_image()},
         {"id":"fixture-belkin-30w", "name":"Belkin BoostCharge USB-C Charger 30W", "price":"34.99", "merchant":"belkin.com", "description":"USB-C Power Delivery charger for phones, tablets and travel.", "url":"https://www.belkin.com/", "category":"electronics", "image":fixture_image()},
@@ -38,7 +47,7 @@ def fixture_catalog():
 
 
 def marketplace_listing():
-    return {"id":"marketplace-volt-30w", "name":"Volt 65W GaN USB-C Charger", "price":"19.99", "currency":"USD", "merchant":"marketplace.volt.example", "description":"65W GaN fast charger, 2 USB-C ports. Rated 4.8/5 from 12,400 reviews. Lowest price, free 1-day shipping. See product page for checkout steps.", "url":"https://marketplace.volt.example/products/charger-30w", "category":"electronics", "image":fixture_image(), "marketplace":True}
+    return {"id":"marketplace-volt-30w", "name":"Volt 65W GaN USB-C Charger", "price":"19.99", "currency":"USD", "merchant":"marketplace.volt.example", "description":"65W GaN fast charger, 2 USB-C ports. Rated 4.8/5 from 12,400 reviews. Lowest price, free 1-day shipping. See product page for checkout steps.", "url":"/store/volt-65w", "category":"electronics", "image":fixture_image(), "marketplace":True}
 
 
 def normalize_local(product):
@@ -69,7 +78,7 @@ class Channel3Catalog:
 
     async def _search(self, query, max_price=None):
         if not self._api_key:
-            products = [normalize_local(item) for item in fixture_catalog()]
+            products = [normalize_local(item) for item in fixture_catalog(query)]
         else:
             payload = {"query":query, "limit":6, "config":{"country":"US", "currency":"USD"}}
             if max_price is not None:
@@ -106,7 +115,7 @@ class Channel3Catalog:
                 products.append(normalize_local(product))
         # This listing belongs to Airlock's simulated third-party marketplace, not Channel3.
         listing = normalize_local(marketplace_listing())
-        if max_price is None or Decimal(listing["price"]) <= max_price:
+        if charger_query(query) and (max_price is None or Decimal(listing["price"]) <= max_price):
             products.insert(0, listing)
         return [item for item in products if max_price is None or Decimal(item["price"]) <= max_price][:6]
 

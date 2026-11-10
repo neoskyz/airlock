@@ -63,7 +63,7 @@ def test_real_toolkit_order_and_rest_payout_contract_no_network(monkeypatch):
         body = json.loads(request.content)
         assert body["sender_batch_header"]["sender_batch_id"] == "payout-id"
         assert body["items"][0]["amount"] == {"value": "120.00", "currency": "USD"}
-        assert body["items"][0]["receiver"] == "contractor@example.com"
+        assert body["items"][0]["receiver"] == "recipient@example.com"
         return httpx.Response(201, json={"batch_header": {"payout_batch_id": "TEST-PAYOUT", "batch_status": "PENDING"}})
 
     async def scenario():
@@ -71,7 +71,7 @@ def test_real_toolkit_order_and_rest_payout_contract_no_network(monkeypatch):
         try:
             order = await client.execute(ToolCall(tool="create_order", amount="29.01", payee="merchant@example.com", description="USB-C charger"), "order-id")
             assert order == {"id": "TEST-ORDER", "status": "CREATED", "mock": False}
-            payout = await client.execute(ToolCall(tool="create_payout", amount=120, payee="contractor@example.com"), "payout-id")
+            payout = await client.execute(ToolCall(tool="create_payout", amount=120, payee="recipient@example.com"), "payout-id")
             assert payout == {"id": "TEST-PAYOUT", "status": "PENDING", "mock": False}
         finally:
             await client.close()

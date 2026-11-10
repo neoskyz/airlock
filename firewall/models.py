@@ -28,6 +28,11 @@ class ToolCall(BaseModel):
     description: str = Field(default="", max_length=1000)
     category: str = Field(default="", max_length=100)
     product_id: str = Field(default="", max_length=200)
+    merchant: str = Field(default="", max_length=254)
+
+    @property
+    def risk_recipient(self):
+        return self.merchant if self.tool == "create_order" and self.merchant else self.payee
 
     @field_validator("amount")
     @classmethod

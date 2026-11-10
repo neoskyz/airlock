@@ -49,5 +49,3 @@ services:
         sync: false
       - key: PAYPAL_SHOP_EMAIL
         value: shop@chargers.example
-      - key: PAYPAL_CONTRACTOR_EMAIL
-        value: contractor@contractor.example

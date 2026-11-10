@@ -64,10 +64,10 @@ def test_event_detail_records_call_five_policy_snapshot_review_evidence_and_run_
 def test_flagged_filters_keep_resolved_approvals_and_approval_history(tmp_path, approved):
     app = create_app(Settings(initial_mode="Enforce", sqlite_path=str(tmp_path/"approval.sqlite3"), demo_mode=True), paypal=MockPayPal(), judge=RuleJudge())
     with TestClient(app) as client:
-        run = client.post("/api/runs", json={"message":"Pay my contractor's $120 invoice"}).json()["id"]
+        run = client.post("/api/runs", json={"message":"Buy me noise-cancelling headphones under $300"}).json()["id"]
         pending = poll(client, run, "awaiting_approval")
         identifier = pending["approvals"][0]["id"]
-        assert client.get("/api/audit/flagged?type=REQUIRE_APPROVAL").json()["stats"]["total_amount"] == "120.00"
+        assert client.get("/api/audit/flagged?type=REQUIRE_APPROVAL").json()["stats"]["total_amount"] == "249.99"
         assert client.post(f"/api/approvals/{identifier}", json={"approved":approved}).status_code == 200
         poll(client, run)
         event = client.get(f"/api/audit/{identifier}").json()
@@ -79,7 +79,7 @@ def test_flagged_filters_keep_resolved_approvals_and_approval_history(tmp_path, 
         assert event["latency"]["approval_ms"] >= 0
         result = client.get("/api/audit/flagged?type=REQUIRE_APPROVAL&policy=risk_threshold").json()
         assert [row["id"] for row in result["rows"]] == [identifier]
-        assert result["stats"]["totals_by_currency"] == {"USD":"120.00"}
+        assert result["stats"]["totals_by_currency"] == {"USD":"249.99"}
         assert not client.get("/api/audit/flagged?type=BLOCK").json()["rows"]
         assert not client.get("/api/audit/flagged?policy=categories").json()["rows"]
         assert client.get("/api/audit/flagged?type=ALLOW").status_code == 422
@@ -109,7 +109,7 @@ def test_legacy_detail_is_unknown_and_restart_preserves_approval_computation(tmp
     store = AuditStore(path)
     legacy = store.insert(ToolCall(tool="create_order", amount="1", payee="shop"), Verdict(decision="ALLOW", reason="Old record"), "old", True, True, [], "succeeded")
     store.connection.execute("UPDATE audit SET metadata='{}' WHERE id=?", (legacy,))
-    pending = store.insert(ToolCall(tool="create_payout", amount="120", payee="contractor"), Verdict(decision="REQUIRE_APPROVAL", reason="Review"), "restart", True, True, [], "awaiting_approval")
+    pending = store.insert(ToolCall(tool="create_order", amount="249.99", payee="shop", merchant="sony.com", category="electronics", description="headphones"), Verdict(decision="REQUIRE_APPROVAL", reason="Review"), "restart", True, True, [], "awaiting_approval")
     store.connection.commit()
     store.close()
     app = create_app(Settings(sqlite_path=path), paypal=MockPayPal(), judge=RuleJudge())
@@ -127,7 +127,7 @@ def test_spa_nested_routes_return_app_and_do_not_swallow_missing_api_assets(tmp_
     (tmp_path/"index.html").write_text("<html>Airlock application</html>")
     app = create_app(Settings(sqlite_path=str(tmp_path/"spa.sqlite3"), frontend_dist=str(tmp_path)), paypal=MockPayPal(), judge=RuleJudge())
     with TestClient(app) as client:
-        for route in ["/console/events/event-id", "/console/flagged"]:
+        for route in ["/console/events/event-id", "/console/flagged", "/store/volt-65w"]:
             response = client.get(route)
             assert response.status_code == 200 and response.text == "<html>Airlock application</html>"
         assert client.get("/api/audit/missing").status_code == 404
@@ -138,14 +138,14 @@ def test_spa_nested_routes_return_app_and_do_not_swallow_missing_api_assets(tmp_
 def test_policy_snapshot_stays_fixed_during_review_and_post_approval_recheck_is_separate():
     async def scenario():
         audit = AuditStore(":memory:")
-        policy = Policy(allowed_payees=["contractor"])
+        policy = Policy(allowed_payees=["shop"])
         judge = type("Judge", (), {"mode":"rules", "judge":AsyncMock(return_value=Verdict(decision="ALLOW", reason="Authorized"))})()
         firewall = Firewall(policy, judge, audit)
         async def approve(*args):
             firewall.policy.daily_limit = Decimal("100")
             return True
         execute = AsyncMock()
-        await firewall.invoke(ToolCall(tool="create_payout", amount="120", payee="contractor"), Provenance("Pay my contractor $120 invoice"), execute, request_approval=approve)
+        await firewall.invoke(ToolCall(tool="create_order", amount="249.99", payee="shop", merchant="sony.com", category="electronics", description="headphones"), Provenance("Buy me noise-cancelling headphones under $300"), execute, request_approval=approve)
         event = audit.report()["rows"][0]
         assert event["policy_snapshot"]["daily_limit"] == "2000"
         assert event["policy_checks"][1]["outcome"] == "pass"
@@ -165,7 +165,7 @@ def test_policy_snapshot_stays_fixed_during_review_and_post_approval_recheck_is_
 def test_review_detail_distinguishes_skipped_cached_ai_and_failed_review():
     async def scenario():
         audit = AuditStore(":memory:")
-        policy = Policy(allowed_payees=["shop", "contractor"])
+        policy = Policy(allowed_payees=["shop", "shop"])
         judge = type("Judge", (), {"mode":"anthropic", "judge":AsyncMock(return_value=Verdict(decision="ALLOW", reason="Authorized"))})()
         firewall = Firewall(policy, judge, audit)
         executor = AsyncMock(return_value={"id":"MOCK-ID", "status":"PENDING"})
@@ -173,8 +173,8 @@ def test_review_detail_distinguishes_skipped_cached_ai_and_failed_review():
         await firewall.invoke(purchase, Provenance("Buy me a USB-C charger under $40"), executor, run_id="low-risk")
         skipped = audit.report()["rows"][0]["ai_review_detail"]
         assert skipped["status"] == "skipped" and not skipped["invoked"] and not skipped["model_invoked"]
-        call = ToolCall(tool="create_payout", amount="120", payee="contractor")
-        provenance = Provenance("Pay my contractor $120 invoice")
+        call = ToolCall(tool="create_order", amount="249.99", payee="shop", merchant="sony.com", category="electronics", description="headphones")
+        provenance = Provenance("Buy me noise-cancelling headphones under $300")
         for _ in range(2):
             await firewall.invoke(call, provenance, executor, run_id="cached", mode="Monitor")
         rows = audit.report()["rows"]
@@ -193,7 +193,7 @@ def test_review_detail_distinguishes_skipped_cached_ai_and_failed_review():
 def test_review_await_keeps_original_policy_snapshot_and_records_current_policy_recheck():
     async def scenario():
         audit = AuditStore(":memory:")
-        policy = Policy(allowed_payees=["contractor"])
+        policy = Policy(allowed_payees=["shop"])
         async def review(call, provenance):
             firewall.policy = policy.model_copy(update={"single_transaction_limit":Decimal("50")})
             await asyncio.sleep(0)
@@ -201,7 +201,7 @@ def test_review_await_keeps_original_policy_snapshot_and_records_current_policy_
         judge = type("Judge", (), {"mode":"rules", "judge":staticmethod(review)})()
         firewall = Firewall(policy, judge, audit)
         executor = AsyncMock()
-        result = await firewall.invoke(ToolCall(tool="create_payout", amount="120", payee="contractor"), Provenance("Pay my contractor $120 invoice"), executor)
+        result = await firewall.invoke(ToolCall(tool="create_order", amount="249.99", payee="shop", merchant="sony.com", category="electronics", description="headphones"), Provenance("Buy me noise-cancelling headphones under $300"), executor)
         assert result["decision"] == "BLOCK"
         event = audit.report()["rows"][0]
         assert event["latency"]["end_to_end_ms"] >= event["latency"]["total_ms"]
@@ -218,12 +218,12 @@ def test_review_await_keeps_original_policy_snapshot_and_records_current_policy_
 def test_cancelled_approval_records_wait_and_total_latency_without_execution():
     async def scenario():
         audit = AuditStore(":memory:")
-        policy = Policy(allowed_payees=["contractor"])
+        policy = Policy(allowed_payees=["shop"])
         judge = type("Judge", (), {"mode":"rules", "judge":AsyncMock(return_value=Verdict(decision="ALLOW", reason="Authorized"))})()
         firewall = Firewall(policy, judge, audit)
         future = asyncio.get_running_loop().create_future()
         executor = AsyncMock()
-        task = asyncio.create_task(firewall.invoke(ToolCall(tool="create_payout", amount="120", payee="contractor"), Provenance("Pay my contractor $120 invoice"), executor, request_approval=lambda *args:future))
+        task = asyncio.create_task(firewall.invoke(ToolCall(tool="create_order", amount="249.99", payee="shop", merchant="sony.com", category="electronics", description="headphones"), Provenance("Buy me noise-cancelling headphones under $300"), executor, request_approval=lambda *args:future))
         await asyncio.sleep(0)
         assert audit.report()["rows"][0]["status"] == "awaiting_approval"
         task.cancel()
@@ -242,7 +242,7 @@ def test_cancelled_approval_records_wait_and_total_latency_without_execution():
 def test_threshold_change_during_judge_review_applies_to_decision_but_preserves_initial_checks():
     async def scenario():
         audit = AuditStore(":memory:")
-        policy = Policy(allowed_payees=["contractor"])
+        policy = Policy(allowed_payees=["shop"])
         async def review(call, provenance):
             await asyncio.sleep(0)
             firewall.policy = policy.model_copy(update={"risk_approval_threshold":40})
@@ -251,12 +251,12 @@ def test_threshold_change_during_judge_review_applies_to_decision_but_preserves_
         firewall = Firewall(policy, judge, audit)
         executor = AsyncMock()
         approval = AsyncMock(return_value=False)
-        result = await firewall.invoke(ToolCall(tool="create_payout", amount="20", payee="contractor"), Provenance("Pay my contractor $20 invoice"), executor, request_approval=approval)
+        result = await firewall.invoke(ToolCall(tool="create_order", amount="20", payee="shop", merchant="sony.com", category="electronics", description="headphones"), Provenance("Buy me headphones under $40"), executor, request_approval=approval)
         assert result["computed_decision"] == "REQUIRE_APPROVAL"
         approval.assert_awaited_once()
         executor.assert_not_awaited()
         event = audit.report()["rows"][0]
-        assert event["risk_score"] == 44
+        assert event["risk_score"] == 50
         assert event["policy_snapshot"]["risk_approval_threshold"] == 60
         assert event["policy_checks"][4]["outcome"] == "pass"
         recheck = event["policy_rechecks"][0]

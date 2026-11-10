@@ -4,6 +4,10 @@ import type { Product, Run, TimelineEvent } from './types';
 import './clientActivity.css';
 
 const money = (value: string | number | undefined) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value || 0));
+export function productHref(product: Product): string | undefined {
+  if (product.url === '/store/volt-65w') return product.url;
+  try { const url = new URL(product.url || ''); return ['https:', 'http:'].includes(url.protocol) ? url.href : undefined; } catch { return undefined; }
+}
 const productName = (product: Product) => product.title || product.name;
 type Step = { id: string; kind: 'search' | 'page' | 'payment'; event: TimelineEvent; products?: Product[]; selectedProduct?: string; result?: TimelineEvent; pending?: boolean; product?: Product };
 
@@ -44,7 +48,7 @@ export function activitySteps(events: TimelineEvent[]): Step[] {
   return steps;
 }
 
-function ProductImage({ product, large = false }: { product: Product; large?: boolean }) {
+export function ProductImage({ product, large = false }: { product: Product; large?: boolean }) {
   const [failedUrl, setFailedUrl] = useState('');
   const url = product.image || product.image_url;
   return <div className={`product-image ${large ? 'large' : ''}`}>{url && failedUrl !== url ? <img src={url} alt={productName(product)} onError={() => setFailedUrl(url)} loading="lazy"/> : <div className="charger-illustration"><span/><i/><b/></div>}</div>;
@@ -91,7 +95,7 @@ export function ClientActivity({ run }: { run: Run }) {
       const ready = step.products !== undefined;
       const failed = step.result?.type === 'catalog_error';
       const state = failed ? 'interrupted' : ready ? 'complete' : active && isLast ? 'active' : 'interrupted';
-      return <li key={step.id}><article className={`activity-operation search-operation ${state}`}><StepHeader number={index + 1} title="Catalog search" description={failed ? step.result?.message : ready ? `${step.products?.length} products found for your request` : 'Finding products that match your request'} state={state} label={failed ? 'Unavailable' : ready ? 'Complete' : active && isLast ? 'In progress' : 'Interrupted'}/>{ready && <><div className="product-grid">{step.products?.map(product => <article key={product.id} className={`product-card ${step.selectedProduct === product.id ? 'agent-selected' : step.selectedProduct ? 'agent-alternative' : ''}`} aria-label={`${productName(product)}${step.selectedProduct === product.id ? ', selected by agent' : ''}`}><div className="activity-product-image"><ProductImage product={product}/>{step.selectedProduct === product.id && <span className="agent-selection-badge">✓ Selected by agent</span>}</div><div className="product-card-body"><span className="merchant-domain">{product.domain || product.merchant}</span><h4>{productName(product)}</h4><div className="product-bottom"><strong>{money(product.price)}</strong><span>{product.category || 'Electronics'}</span></div></div></article>)}</div><div className="catalog-credit">Product catalog by <strong>Channel3</strong></div></>}</article></li>;
+      return <li key={step.id}><article className={`activity-operation search-operation ${state}`}><StepHeader number={index + 1} title="Catalog search" description={failed ? step.result?.message : ready ? `${step.products?.length} products found for your request` : 'Finding products that match your request'} state={state} label={failed ? 'Unavailable' : ready ? 'Complete' : active && isLast ? 'In progress' : 'Interrupted'}/>{ready && <><div className="product-grid">{step.products?.map(product => <a key={product.id} href={productHref(product)} target="_blank" rel="noopener noreferrer" className={`product-card ${step.selectedProduct === product.id ? 'agent-selected' : step.selectedProduct ? 'agent-alternative' : ''}`} aria-label={`${productName(product)}${step.selectedProduct === product.id ? ', selected by agent' : ''}`}><div className="activity-product-image"><ProductImage product={product}/>{step.selectedProduct === product.id && <span className="agent-selection-badge">✓ Selected by agent</span>}</div><div className="product-card-body"><span className="merchant-domain">{product.domain || product.merchant}</span><h4>{productName(product)}</h4><div className="product-bottom"><strong>{money(product.price)}</strong><span>{product.category || 'Electronics'}</span></div></div></a>)}</div><div className="catalog-credit">Product catalog by <strong>Channel3</strong></div></>}</article></li>;
     })}</ol>
     {run.status === 'completed' && <div className="task-finished">✓ Task finished<span>Orders and payouts retain their PayPal status; acceptance does not confirm settlement.</span></div>}
     {run.status === 'cancelled' && <div className="task-finished">Task stopped. Submitted requests are not rolled back.</div>}

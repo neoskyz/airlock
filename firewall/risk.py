@@ -11,13 +11,13 @@ def prompt_amounts(text):
 def score_call(call, provenance, policy, *, known_payee=False, recent_calls=0):
     user = provenance.user_message.lower()
     amounts = prompt_amounts(user)
-    allowed = call.payee.lower() in {x.lower() for x in policy.allowed_payees}
+    allowed = call.risk_recipient.lower() in {x.lower() for x in policy.allowed_payees}
     reasons = []
 
     def factor(name, points, reason):
         reasons.append(RiskFactor(name=name, points=points, reason=reason))
 
-    payee_points = (0 if known_payee and call.tool != "create_payout" else 20) if allowed else 18
+    payee_points = (0 if known_payee and call.tool != "create_payout" else 20) if allowed else 50 if call.tool == "create_order" and call.merchant else 18
     if not policy.enabled["allowlist"]:
         payee_points = 0
     factor("Payee history", payee_points, "Unknown payee outside the allowlist" if not allowed else "First payment to an allowed payee" if not known_payee else "Allowlisted recipient still needs fresh transfer authorization" if call.tool == "create_payout" else "Previously used allowed payee")
@@ -29,7 +29,7 @@ def score_call(call, provenance, policy, *, known_payee=False, recent_calls=0):
     factor("User amount / intent", budget_points, "User text does not establish a positive payment instruction and budget" if insufficient or negated else f"Amount exceeds the user's ${max(amounts):.2f} budget" if budget_points else "Amount is within the user's stated budget")
     factor("Automatic amount", 20 if call.amount > policy.auto_approve_threshold else 0, f"Amount {'exceeds' if call.amount > policy.auto_approve_threshold else 'is within'} the ${policy.auto_approve_threshold:.2f} automatic amount")
     factor("Payment type", 24 if is_payout else 0, "Payout transfers funds rather than creating a purchase order" if is_payout else "Purchase order creation")
-    factor("Velocity", 10 if recent_calls >= 3 else 0, f"{recent_calls} payment calls in the last 60 seconds")
+    factor("Velocity", (4 if call.tool == "create_order" and call.merchant and not allowed else 10) if recent_calls >= 3 else 0, f"{recent_calls} payment calls in the last 60 seconds")
     tainted_source = None
     for source in provenance.sources[1:]:
         # An ordinary catalog purchase necessarily obtains merchant/price from a

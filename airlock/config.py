@@ -26,7 +26,6 @@ class Settings:
     sqlite_path: str = "data/audit.sqlite3"
     policy_path: str = str(ROOT / "policies/default.yaml")
     shop_email: str = "shop@chargers.example"
-    contractor_email: str = "contractor@contractor.example"
     run_rate_limit_per_minute: int = 5
     run_rate_limit_per_hour: int = 30
     daily_llm_call_limit: int = 500
@@ -89,5 +88,4 @@ class Settings:
             sqlite_path=os.getenv("SQLITE_PATH", "data/audit.sqlite3"),
             policy_path=os.getenv("POLICY_PATH", str(ROOT / "policies/default.yaml")),
             shop_email=os.getenv("PAYPAL_SHOP_EMAIL") or "shop@chargers.example",
-            contractor_email=os.getenv("PAYPAL_CONTRACTOR_EMAIL") or "contractor@contractor.example",
         )

@@ -220,7 +220,7 @@ def test_order_execution_uses_host_sandbox_payee_and_catalog_category(tmp_path):
         paypal = MockPayPal()
         paypal.execute = AsyncMock(wraps=paypal.execute)
         settings = Settings(shop_email="sandbox-shop@example.com")
-        firewall.policy.allowed_payees.append(settings.shop_email)
+        firewall.policy.allowed_payees.extend([settings.shop_email, "real-store.example"])
         agent = DemoAgent(settings, firewall, paypal, ApprovalManager())
         run = Run("Buy me a USB-C charger under $40", True)
         run.selected_product = {"id":"real-catalog-item","category":"electronics","merchant":"real-store.example"}
@@ -229,6 +229,7 @@ def test_order_execution_uses_host_sandbox_payee_and_catalog_category(tmp_path):
         call = paypal.execute.await_args.args[0]
         assert call.payee == "sandbox-shop@example.com"
         assert call.category == "electronics" and call.product_id == "real-catalog-item"
+        assert call.merchant == "real-store.example"
         await agent.catalog.close()
         audit.close()
     asyncio.run(scenario())
@@ -328,4 +329,41 @@ def test_charger_wattage_cannot_bypass_single_order_guard():
         assert "error" in await agent.execute_tool(run, "create_order", args)
         firewall.invoke.assert_awaited_once()
         await agent.catalog.close()
+    asyncio.run(scenario())
+
+
+def test_scripted_headphone_purchase_uses_catalog_product_and_only_create_order():
+    async def scenario():
+        firewall = SimpleNamespace(invoke=AsyncMock(return_value={"status":"CREATED", "id":"MOCK-ORDER", "mock":True}))
+        agent = DemoAgent(Settings(), firewall, MockPayPal(), ApprovalManager())
+        run = Run("Buy me noise-cancelling headphones under $300", True, agent_mode="compromised")
+        await agent.scripted(run)
+        assert firewall.invoke.await_count == 1
+        call = firewall.invoke.await_args.args[0]
+        assert call.tool == "create_order" and str(call.amount) == "249.99"
+        assert call.merchant == "sony.com" and call.payee == agent.settings.shop_email
+        assert run.selected_product["id"] == "fixture-sony-headphones"
+        assert INJECTION not in json.dumps([source.model_dump() for source in run.provenance.sources])
+        await agent.catalog.close()
+    asyncio.run(scenario())
+
+
+def test_scripted_headphones_prefers_budget_appropriate_real_offer_without_fabricating_price():
+    import httpx
+    from airlock.catalog import Channel3Catalog
+
+    async def scenario():
+        for prices, expected in [(["89.99", "229.99", "279.00"], "229.99"), (["89.99"], "89.99")]:
+            products = [{"id":f"headphones-{price}", "title":"Wireless active noise-cancelling headphones", "offers":[{"url":f"https://seller.example/headphones/{price}", "domain":"seller.example", "price":{"price":price,"currency":"USD"}}]} for price in prices]
+            catalog = Channel3Catalog("test-key", transport=httpx.MockTransport(lambda _:httpx.Response(200,json={"products":products})))
+            firewall = SimpleNamespace(invoke=AsyncMock(return_value={"status":"CREATED", "id":"MOCK-ORDER", "mock":True}))
+            agent = DemoAgent(Settings(), firewall, MockPayPal(), ApprovalManager(), catalog=catalog)
+            run = Run("Buy me noise-cancelling headphones under $300", True, agent_mode="compromised")
+            await agent.scripted(run)
+            assert firewall.invoke.await_count == 1
+            call = firewall.invoke.await_args.args[0]
+            assert call.tool == "create_order" and str(call.amount) == expected
+            assert call.merchant == "seller.example"
+            assert run.selected_product["url"] == f"https://seller.example/headphones/{expected}"
+            await catalog.close()
     asyncio.run(scenario())

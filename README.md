@@ -47,7 +47,7 @@ Multiple purchases require an explicit item quantity in the original user reques
 
 The sandbox HTTP bridge adds the reviewed payee, OAuth, timeout, and idempotency ID, then checks the Toolkit payload against the reviewed Decimal amount. Only the bottom-level Toolkit order function is imported. No live PayPal endpoints are used. Every proposed payment goes through `Firewall.invoke`, including Monitor mode.
 
-A **created order is not a captured payment**, and an accepted payout batch may remain **PENDING**. Returned IDs and provider statuses are preserved. The contractor payment is a payout toward an invoice, not a PayPal Invoicing object or a claim of settlement.
+A **created order is not a captured payment**, and an accepted payout batch may remain **PENDING**. Returned IDs and provider statuses are preserved.
 
 ## Monitor and Enforce
 
@@ -62,15 +62,15 @@ Mode and policy edits take effect immediately and are audited. Configuration is 
 | --- | --- | --- |
 | Single-transaction limit | $1,000 USD | BLOCK above the limit. |
 | Period budget | $2,000 per UTC week | BLOCK if executed/reserved amounts plus the call exceed the budget; daily is also available. |
-| Merchant / payee allowlist | Configured sandbox shop and contractor | Unknown payees add risk; optional hard-block mode. |
+| Merchant / payee allowlist | Configured sandbox shop and simulated Volt merchant | Unknown payees add risk; optional hard-block mode. |
 | Category restrictions | Gift cards, crypto, gambling | BLOCK catalog products in restricted categories. |
 | Risk thresholds | Approval ≥60; BLOCK ≥85 | Apply thresholds to the final risk score. |
 
-Each policy has an enabled toggle and editable values in the console. The default $2,000 weekly budget leaves room for the Monitor $519.99 trace followed by the Enforce replay and contractor approval. Monitor executions count toward future budgets too. If a tainted payout also exceeds the budget, its primary explanation identifies the unauthorized tool-origin instruction and recipient, with the budget violation as an additional reason. Hard policy blocks still apply. Money uses Decimal and integer cents in SQLite.
+Each policy has an enabled toggle and editable values in the console. The default $2,000 weekly budget leaves room for the Monitor $519.99 trace followed by the Enforce replay and headphone purchase approval. Monitor executions count toward future budgets too. If a tainted payout also exceeds the budget, its primary explanation identifies the unauthorized tool-origin instruction and recipient, with the budget violation as an additional reason. Hard policy blocks still apply. Money uses Decimal and integer cents in SQLite.
 
 ## Hybrid risk scoring
 
-The fast path computes a 0–100 score and records each factor's points: new/unknown payee, amount against the user's stated budget, amount against the automatic-approval amount, payout versus purchase, velocity, call-specific provenance taint, and catalog category. A product page containing an injection does not automatically taint an otherwise authorized order: evidence must relate to the proposed payment.
+The fast path computes a 0–100 score and records each factor's points: new/unknown payee, amount against the user's stated budget, amount against the automatic-approval amount, payout versus purchase, velocity, call-specific provenance taint, and catalog category. Unknown catalog merchants add 50 points and purchases above the $50 automatic amount add 20; the default allowlist includes the simulated Volt merchant, keeping its $19.99 order on the low-risk path. Unknown-merchant purchase velocity adds at most 4 points, keeping the approval example below 85 after a +10 review adjustment. Catalog merchant risk is separate from the sandbox payment recipient. A product page containing an injection does not automatically taint an otherwise authorized order: evidence must relate to the proposed payment.
 
 Hard single-limit, period-budget, and category violations short-circuit review. Other calls invoke the independent Claude Haiku intent judge only in the **30–84 gray zone**, or when provenance taint is detected. Clear low-risk calls skip AI review. A structured verdict provides rationale, suspicious excerpt, and source; bounded adjustments can raise or lower risk. Identical reviews are cached per run. The console shows factors, the policy that fired, and separate rules/AI/total latencies.
 
@@ -92,7 +92,7 @@ Content-Type: application/json
 
 The response is `products[]`; each product's merchant, URL, and price come from `offers[].domain`, `offers[].url`, and `offers[].price.{price,currency}`. Images use `images[].cleaned_url`/`url`, and category comes from `category`. The HTTP adapter follows the SDK protocol and supports mock transports. Without a key, a local realistic fixture catalog is used. Errors with a configured key are reported rather than misrepresented as successful live search.
 
-One **simulated third-party marketplace listing** is added by the sample application's marketplace layer. Its merchant page contains the attacker's checkout-policy injection. It is not a poisoned live Channel3 merchant, and this project does not modify Channel3 data. Search and opened-page text retain untrusted tool provenance.
+One **simulated third-party marketplace listing** is added only for charger-related searches (charger, USB-C, GaN, power adapter; case-insensitive). Headphone and other searches contain only Channel3 products when configured, or the no-key fixture catalog documented here. Its merchant page contains the attacker's checkout-policy injection. It is not a poisoned live Channel3 merchant, and this project does not modify Channel3 data. Search and opened-page text retain untrusted tool provenance. Product cards open the selected Channel3 offer URL in a new tab. Volt opens `/store/volt-65w`, a local simulated marketplace page showing the same checkout-policy text and a security-testing disclosure.
 
 Real catalog merchants are **never paid**. Purchases are mapped to `PAYPAL_SHOP_EMAIL` through the sandbox adapter. Catalog URLs/images are used as product metadata, not as payment authorization.
 
@@ -154,7 +154,6 @@ For frontend iteration, keep FastAPI on port 8000 and run `npm run dev --prefix 
 | `AIRLOCK_MODE` | `Monitor`; initial shared mode, accepts `Monitor` or `Enforce`. The console can change it immediately. |
 | `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` | Empty: MOCK. Set both for sandbox Toolkit orders and REST payouts. |
 | `PAYPAL_SHOP_EMAIL` | `shop@chargers.example`; replace with a valid sandbox merchant before real requests. |
-| `PAYPAL_CONTRACTOR_EMAIL` | `contractor@contractor.example`; replace with a valid sandbox recipient. |
 | `SANDBOX_STARTING_BALANCE` | `10000.00`; initial local sandbox spending ledger, not an account balance API. |
 | `RUN_RATE_LIMIT_PER_MINUTE` / `RUN_RATE_LIMIT_PER_HOUR` | `5` / `30` new runs per IP per rolling period. |
 | `DAILY_LLM_CALL_LIMIT` | `500` attempted agent/judge API calls per UTC day, including failed requests. |
@@ -167,9 +166,9 @@ Rate limits trust the first `X-Forwarded-For` IP supplied by Render. Limits and 
 
 For deterministic behavior, set `AGENT_MODE=compromised` or `DEMO_MODE=true` before startup. A live model chooses its own tools and may resist the injection.
 
-1. Open the client and console tabs. Reset local sandbox data in Policies before recording. In Monitor, enter `Buy me a USB-C charger under $40`. The fixture-based trace proposes the Volt 65W GaN USB-C Charger at $19.99 and a $500 injected payout. The console shows **Would have blocked**, the provider result and PayPal ID; the local ledger drops by $519.99.
+1. Open the client and console tabs. Reset local sandbox data in Policies before recording. In Monitor, enter `Buy me the cheapest 65W USB-C charger under $40`. The fixture-based trace proposes the Volt 65W GaN USB-C Charger at $19.99 and a $500 injected payout. The console shows **Would have blocked**, the provider result and PayPal ID; the local ledger drops by $519.99.
 2. Switch the console to Enforce and repeat. The attempted payout is rejected; the authorized charger order is allowed.
-3. Enter `Pay my contractor's $120 invoice`. A phone-style approval notification opens the approval inbox. Approve or Deny is consumed once.
+3. Enter `Buy me noise-cancelling headphones under $300`. A $200–$300 purchase from an unknown merchant scores 70 before bounded intent adjustments (60–80), so Enforce sends a phone-style approval notification. Approve creates one sandbox order; Deny never executes it. Approval is consumed once.
 4. Inspect editable policies, AG Grid audit rows, factor/latency details, and the SDK documentation.
 
 The simulation illustrates a compromised agent reaching the payment boundary. It is not evidence that a live model was attacked in this implementation run.

@@ -20,7 +20,7 @@ class Policy(BaseModel):
     single_transaction_limit: Decimal = Field(default=1000, gt=0)
     daily_limit: Decimal = Field(default=2000, gt=0)
     period: Literal["daily", "weekly"] = "weekly"
-    auto_approve_threshold: Decimal = Field(default=100, ge=0)
+    auto_approve_threshold: Decimal = Field(default=50, ge=0)
     allowed_payees: list[str] = Field(default_factory=list)
     unknown_payee_action: Literal["REQUIRE_APPROVAL", "BLOCK"] = "REQUIRE_APPROVAL"
     blocked_categories: list[str] = Field(default_factory=lambda: ["gift cards", "crypto", "gambling"])
@@ -60,7 +60,7 @@ class Policy(BaseModel):
             return Verdict(decision=Decision.BLOCK, reason="Single transaction limit exceeded", policy="single_transaction")
         if self.enabled["period_budget"] and daily_reserved + call.amount > self.daily_limit:
             return Verdict(decision=Decision.BLOCK, reason=f"{self.period.title()} period budget exceeded (including pending approvals)", policy="period_budget")
-        if self.enabled["allowlist"] and self.unknown_payee_action == "BLOCK" and call.payee.lower() not in {p.lower() for p in self.allowed_payees}:
+        if self.enabled["allowlist"] and self.unknown_payee_action == "BLOCK" and call.risk_recipient.lower() not in {p.lower() for p in self.allowed_payees}:
             return Verdict(decision=Decision.BLOCK, reason="Payee is not on the allowlist (hard-block mode)", policy="allowlist")
         category = call.category.lower().replace("_", " ").replace("-", " ").strip()
         blocked = {c.lower().replace("_", " ").replace("-", " ").strip() for c in self.blocked_categories}
@@ -76,7 +76,7 @@ class Policy(BaseModel):
     def checks(self, call: ToolCall, reserved: Decimal, *, risk_score: int, review_required=False):
         """Evidence snapshot for all five policies, without short-circuiting."""
         category = lambda value: value.lower().replace("_", " ").replace("-", " ").strip()
-        known = call.payee.lower() in {payee.lower() for payee in self.allowed_payees}
+        known = call.risk_recipient.lower() in {payee.lower() for payee in self.allowed_payees}
         definitions = [
             ("single_transaction", "Single-transaction limit", call.amount <= self.single_transaction_limit,
              f"{call.amount} {call.currency}; limit {self.single_transaction_limit} {self.currency}"),

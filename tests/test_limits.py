@@ -1,4 +1,5 @@
 import asyncio
+from decimal import Decimal
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
@@ -93,7 +94,7 @@ def test_mid_live_shared_budget_stops_without_replaying_payment(tmp_path, provid
         policy = Policy.load("policies/default.yaml")
         # This test exercises shared agent/reviewer budget exhaustion. Put the
         # order in the gray zone; low-risk orders now correctly skip the judge.
-        policy.auto_approve_threshold = 10
+        policy.auto_approve_threshold = Decimal("10")
         firewall = Firewall(policy, judge, audit)
         paypal = MockPayPal()
         paypal.execute = AsyncMock(wraps=paypal.execute)
@@ -109,7 +110,7 @@ def test_mid_live_shared_budget_stops_without_replaying_payment(tmp_path, provid
             client=client,budget=budget)
         run = Run("Buy me a USB-C charger under $40",True,agent_mode="live")
         # The host has already opened this catalog product before checkout.
-        run.selected_product = {"id":"budget-test-charger", "category":"electronics"}
+        run.selected_product = {"id":"budget-test-charger", "category":"electronics", "merchant":"marketplace.volt.example"}
         await agent.run(run)
         assert run.status == "completed"
         assert run.agent_mode == "live"  # Preserve the identity of the agent that actually ran.

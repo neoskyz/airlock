@@ -28,16 +28,16 @@ def test_all_demo_scenarios_and_approval_single_consumption(tmp_path):
         enabled=client.post("/api/runs",json={"message":"Buy me a USB-C charger under $40","firewall_enabled":True}).json()["id"]
         on=poll(client,enabled)
         assert any(e.get("decision")=="BLOCK" and e.get("suspicious_excerpt") for e in on["events"])
-        contractor=client.post("/api/runs",json={"message":"Also pay my contractor $120 invoice","firewall_enabled":True}).json()["id"]
-        pending=poll(client,contractor,"awaiting_approval")
+        headphones=client.post("/api/runs",json={"message":"Buy me noise-cancelling headphones under $300","firewall_enabled":True}).json()["id"]
+        pending=poll(client,headphones,"awaiting_approval")
         identifier=pending["approvals"][0]["id"]
         assert client.post(f"/api/approvals/{identifier}",json={"approved":True}).status_code==200
         assert client.post(f"/api/approvals/{identifier}",json={"approved":True}).status_code==409
-        final=poll(client,contractor)
+        final=poll(client,headphones)
         assert final["approvals"][0]["status"]=="approved"
         audit=client.get("/api/audit").json()
         assert len([r for r in audit["rows"] if r["tool"] in {"create_order", "create_payout"}])==5
-        assert audit["stats"]=={"blocked_amount":500,"allowed_amount":659.98}
+        assert audit["stats"]=={"blocked_amount":500,"allowed_amount":789.97}
         assert all(row["mock"] for row in audit["rows"] if row["tool"] in {"create_order", "create_payout"})
 
 
@@ -95,7 +95,7 @@ def test_cancel_pending_approval_is_audited_and_unlocks_new_run(tmp_path):
     paypal.execute = AsyncMock(wraps=paypal.execute)
     settings = Settings(initial_mode="Enforce",sqlite_path=str(tmp_path/"cancel.sqlite3"), demo_mode=True)
     with TestClient(create_app(settings, paypal=paypal, judge=RuleJudge())) as client:
-        identifier = client.post("/api/runs", json={"message":"Also pay my contractor $120 invoice"}).json()["id"]
+        identifier = client.post("/api/runs", json={"message":"Buy me noise-cancelling headphones under $300"}).json()["id"]
         pending = poll(client, identifier, "awaiting_approval")
         approval_id = pending["approvals"][0]["id"]
         response = client.post(f"/api/runs/{identifier}/cancel")
@@ -170,9 +170,9 @@ def test_cancel_before_payment_and_after_approval_resolution_race(tmp_path):
                 await asyncio.sleep(0)
                 rows = (await client.get("/api/audit")).json()["rows"]
                 assert len(rows) == 1 and rows[0]["tool"] == "cancel_run"
-                second = (await client.post("/api/runs", json={"message":"Also pay my contractor $120 invoice"})).json()["id"]
-                for _ in range(100):
-                    await asyncio.sleep(.001)
+                second = (await client.post("/api/runs", json={"message":"Buy me noise-cancelling headphones under $300"})).json()["id"]
+                for _ in range(200):
+                    await asyncio.sleep(.01)
                     run = app.state.runs[second]
                     if run.status == "awaiting_approval":
                         break
@@ -322,7 +322,7 @@ def test_sandbox_reset_rejects_running_and_pending_approval_runs(tmp_path):
         assert client.get("/api/audit").json()["rows"]
         client.post(f"/api/runs/{identifier}/cancel")
         client.patch("/api/mode", json={"mode":"Enforce"})
-        identifier = client.post("/api/runs", json={"message":"Pay my contractor's $120 invoice"}).json()["id"]
+        identifier = client.post("/api/runs", json={"message":"Buy me noise-cancelling headphones under $300"}).json()["id"]
         run = poll(client, identifier, "awaiting_approval")
         assert client.post("/api/sandbox/reset", json={"confirmed":True}).status_code == 409
         assert client.post(f"/api/approvals/{run['approvals'][0]['id']}", json={"approved":False}).status_code == 200
@@ -378,3 +378,39 @@ def test_sandbox_reset_rejects_unfinished_task_even_with_terminal_run_status(tmp
         assert started.wait(3)
         assert client.post("/api/sandbox/reset", json={"confirmed":True}).status_code == 409
         assert app.state.runs
+
+
+def test_channel3_offer_order_waits_for_approval_then_creates_sandbox_order(tmp_path):
+    import json
+    import httpx
+    from unittest.mock import AsyncMock
+    from airlock.catalog import Channel3Catalog, INJECTION
+
+    requests = []
+    def search(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"products":[{"id":"sony-live-offer", "title":"Sony Noise-Cancelling Headphones", "description":"Wireless over-ear headphones", "category":{"slug":"electronics"}, "offers":[{"domain":"sony.com", "url":"https://electronics.sony.com/audio/headphones/p/live-offer", "price":{"price":249.99,"currency":"USD"}}]}]})
+    catalog = Channel3Catalog("test-channel3-key", transport=httpx.MockTransport(search))
+    paypal = MockPayPal()
+    paypal.execute = AsyncMock(wraps=paypal.execute)
+    settings = Settings(initial_mode="Enforce", sqlite_path=str(tmp_path/"channel3-approval.sqlite3"), demo_mode=True)
+    app = create_app(settings, paypal=paypal, judge=RuleJudge(), catalog=catalog)
+    with TestClient(app) as client:
+        run_id = client.post("/api/runs", json={"message":"Buy me noise-cancelling headphones under $300"}).json()["id"]
+        pending = poll(client, run_id, "awaiting_approval")
+        paypal.execute.assert_not_awaited()
+        assert len(requests) == 1 and requests[0]["filters"]["price"]["max_price"] == 300
+        product = next(event for event in pending["events"] if event["type"] == "product_page")["product"]
+        assert product["id"] == "sony-live-offer" and product["url"].startswith("https://electronics.sony.com/")
+        identifier = pending["approvals"][0]["id"]
+        event = client.get(f"/api/audit/{identifier}").json()
+        assert event["call"]["tool"] == "create_order" and event["call"]["merchant"] == "sony.com"
+        assert event["call"]["payee"] == settings.shop_email
+        assert event["computed_decision"] == "REQUIRE_APPROVAL" and 60 <= event["risk_score"] < 85
+        assert client.post(f"/api/approvals/{identifier}", json={"approved":True}).status_code == 200
+        poll(client, run_id)
+        paypal.execute.assert_awaited_once()
+        assert client.get(f"/api/audit/{identifier}").json()["paypal_status"] == "CREATED"
+        assert client.post(f"/api/approvals/{identifier}", json={"approved":True}).status_code == 409
+        storefront = client.get("/api/store/volt-65w").json()
+        assert storefront["url"] == "/store/volt-65w" and INJECTION in storefront["page_text"]

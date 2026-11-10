@@ -15,7 +15,7 @@ from firewall.limits import DailyLLMBudget
 from firewall.policy import POLICY_IDS
 from .limits import RunRateLimiter, client_ip
 from .agent import DemoAgent
-from .catalog import Channel3Catalog
+from .catalog import Channel3Catalog, marketplace_listing, normalize_local
 from .config import Settings
 from .paypal import build_paypal
 from .store import ApprovalManager, Run
@@ -53,17 +53,17 @@ class ApprovalChoice(BaseModel):
 def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
     settings = settings or Settings.from_env()
     policy = Policy.load(settings.policy_path)
-    policy.allowed_payees = [settings.shop_email if x == "shop@chargers.example" else settings.contractor_email if x == "contractor@contractor.example" else x for x in policy.allowed_payees]
+    policy.allowed_payees = [settings.shop_email if x == "shop@chargers.example" else x for x in policy.allowed_payees]
     audit = AuditStore(settings.sqlite_path)
     paypal = paypal or build_paypal(settings.paypal_client_id,settings.paypal_client_secret)
     budget = DailyLLMBudget(settings.daily_llm_call_limit)
     rate_limiter = RunRateLimiter(settings.run_rate_limit_per_minute, settings.run_rate_limit_per_hour)
-    fallback = RuleJudge(settings.shop_email, settings.contractor_email)
+    fallback = RuleJudge(settings.shop_email)
     judge = judge or build_judge(settings.anthropic_api_key, model=settings.judge_model, budget=budget, fallback=fallback)
     if isinstance(judge, RuleJudge):
-        judge.shop_payee, judge.contractor_payee = settings.shop_email,settings.contractor_email
+        judge.shop_payee = settings.shop_email
     if hasattr(judge,"trusted_contacts"):
-        judge.trusted_contacts = {"shop":settings.shop_email,"my contractor":settings.contractor_email}
+        judge.trusted_contacts = {"shop":settings.shop_email}
     firewall = Firewall(policy,judge,audit)
     approvals = ApprovalManager()
     mode = settings.initial_mode
@@ -104,7 +104,7 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
                 "demo_mode": modes["agent_mode"] == "compromised", "paypal_mode": paypal.mode,
                 "agent_provider": settings.agent_provider, "agent_model": settings.agent_model,
                 "policy_yaml": yaml.safe_dump(policy.model_dump(mode="json"), sort_keys=False),
-                "shop_email": settings.shop_email, "contractor_email": settings.contractor_email,
+                "shop_email": settings.shop_email,
                 **modes}
 
     def mode_state():
@@ -286,6 +286,11 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
     async def root():
         return RedirectResponse("/console", status_code=307)
 
+    @app.get("/api/store/volt-65w")
+    async def volt_listing():
+        return Channel3Catalog.page(normalize_local(marketplace_listing()))
+
+    @app.get("/store/volt-65w")
     @app.get("/client")
     @app.get("/console")
     @app.get("/docs")

@@ -7,7 +7,7 @@ from airlock.agent import INJECTION
 
 def setup(daily=2000):
     store=AuditStore(":memory:")
-    policy=Policy(single_transaction_limit=1000,daily_limit=daily,auto_approve_threshold=100,allowed_payees=["shop@chargers.example","contractor@contractor.example"])
+    policy=Policy(single_transaction_limit=1000,daily_limit=daily,auto_approve_threshold=100,allowed_payees=["shop@chargers.example","shop@chargers.example"])
     return Firewall(policy,RuleJudge(),store),store
 
 
@@ -31,10 +31,10 @@ def test_attack_block_and_bypass_are_audited():
 def test_approval_really_suspends_and_denial_does_not_execute():
     async def scenario():
         firewall,store=setup()
-        call=ToolCall(tool="create_payout",amount=120,payee="contractor@contractor.example")
+        call=ToolCall(tool="create_order",amount="249.99",payee="shop@chargers.example", merchant="sony.com", category="electronics", description="Noise-cancelling headphones")
         future=asyncio.get_running_loop().create_future()
         execute=AsyncMock(return_value={"id":"MOCK-PAYOUT","status":"PENDING"})
-        task=asyncio.create_task(firewall.invoke(call,Provenance("Also pay my contractor $120 invoice"),execute,request_approval=lambda *args:future))
+        task=asyncio.create_task(firewall.invoke(call,Provenance("Buy me noise-cancelling headphones under $300"),execute,request_approval=lambda *args:future))
         await asyncio.sleep(0)
         execute.assert_not_called()
         assert store.report()["rows"][0]["status"] == "awaiting_approval"
@@ -44,30 +44,30 @@ def test_approval_really_suspends_and_denial_does_not_execute():
         assert store.reserve_total() == 0
         # A separate authorized approval executes exactly once.
         approval=AsyncMock(return_value=True)
-        assert (await firewall.invoke(call,Provenance("Also pay my contractor $120 invoice"),execute,request_approval=approval))["id"] == "MOCK-PAYOUT"
+        assert (await firewall.invoke(call,Provenance("Buy me noise-cancelling headphones under $300"),execute,request_approval=approval))["id"] == "MOCK-PAYOUT"
         execute.assert_awaited_once()
-        assert store.report()["stats"]["allowed_amount"] == 120
+        assert store.report()["stats"]["allowed_amount"] == 249.99
         store.close()
     asyncio.run(scenario())
 
 
 def test_pending_approvals_reserve_daily_budget_across_midnight():
     async def scenario():
-        firewall,store=setup(daily=200)
-        call=ToolCall(tool="create_payout",amount=120,payee="contractor@contractor.example")
+        firewall,store=setup(daily=400)
+        call=ToolCall(tool="create_order",amount="249.99",payee="shop@chargers.example", merchant="sony.com", category="electronics", description="Noise-cancelling headphones")
         future=asyncio.get_running_loop().create_future()
         execute=AsyncMock(return_value={"id":"MOCK-PAYOUT","status":"PENDING"})
-        p=Provenance("Also pay my contractor $120 invoice")
+        p=Provenance("Buy me noise-cancelling headphones under $300")
         task=asyncio.create_task(firewall.invoke(call,p,execute,request_approval=lambda *args:future))
         await asyncio.sleep(0)
         store.connection.execute("UPDATE audit SET timestamp='2000-01-01T00:00:00Z',reserved_day='2000-01-01'")
         store.connection.commit()
-        assert store.reserve_total() == Decimal(120)
+        assert store.reserve_total() == Decimal("249.99")
         blocked=await firewall.invoke(call,p,execute)
         assert blocked["decision"] == "BLOCK"
         future.set_result(True)
         await task
-        assert store.reserve_total() == Decimal(120)
+        assert store.reserve_total() == Decimal("249.99")
         execute.assert_awaited_once()
         store.close()
     asyncio.run(scenario())

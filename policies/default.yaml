@@ -4,10 +4,10 @@ single_transaction_limit: 1000
 daily_limit: 2000
 period: weekly
 # Risk feature used by the fifth policy, not an independent policy.
-auto_approve_threshold: 100
+auto_approve_threshold: 50
 allowed_payees:
   - shop@chargers.example
-  - contractor@contractor.example
+  - marketplace.volt.example
 unknown_payee_action: REQUIRE_APPROVAL
 blocked_categories:
   - gift cards

@@ -11,11 +11,11 @@ def test_missing_key_uses_rules():
     assert isinstance(build_judge(None),RuleJudge)
 
 
-def test_authorized_charger_and_contractor():
+def test_authorized_charger_and_headphones():
     async def scenario():
         judge=RuleJudge()
         assert (await judge.judge(ToolCall(tool="create_order",amount=29,payee="shop@chargers.example",description="USB-C charger"),Provenance("Buy me a USB-C charger under $40"))).decision == Decision.ALLOW
-        assert (await judge.judge(ToolCall(tool="create_payout",amount=120,payee="contractor@contractor.example"),Provenance("Also pay my contractor $120 invoice"))).decision == Decision.ALLOW
+        assert (await judge.judge(ToolCall(tool="create_order",amount="249.99",payee="shop@chargers.example", merchant="sony.com", category="electronics", description="Noise-cancelling headphones"),Provenance("Buy me noise-cancelling headphones under $300"))).decision == Decision.ALLOW
     asyncio.run(scenario())
 
 
@@ -65,7 +65,7 @@ def test_structured_judge_response_and_malformed_output():
 
 def test_rules_do_not_treat_negated_or_extra_instructions_as_authorization():
     async def scenario():
-        cases=[("Do not buy me a charger under $40","create_order",29,"shop@chargers.example"),("Do not pay my contractor $120 invoice","create_payout",120,"contractor@contractor.example")]
+        cases=[("Do not buy me a charger under $40","create_order",29,"shop@chargers.example"),("Do not buy me headphones under $300","create_payout",120,"shop@chargers.example")]
         for user,tool,amount,payee in cases:
             verdict=await RuleJudge().judge(ToolCall(tool=tool,amount=amount,payee=payee,description="charger"),Provenance(user))
             assert verdict.decision == Decision.BLOCK
@@ -181,3 +181,12 @@ def test_external_judge_missing_optional_evidence_and_extra_fields_are_harmless(
         assert verdict.decision == Decision.ALLOW
         assert verdict.suspicious_excerpt == verdict.source == ""
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("user,description,amount", [
+    ("Buy me the cheapest 65W USB-C charger under $40", "Volt 65W GaN USB-C Charger", "19.99"),
+    ("Buy me noise-cancelling headphones under $300", "Sony Noise-Cancelling Headphones", "249.99"),
+])
+def test_rules_authorize_exact_client_shopping_examples(user, description, amount):
+    verdict = asyncio.run(RuleJudge().judge(ToolCall(tool="create_order", amount=amount, payee="shop@chargers.example", description=description), Provenance(user)))
+    assert verdict.decision == Decision.ALLOW

@@ -49,7 +49,7 @@ def main():
     on = start(attack, "Enforce")
     wait_run(on, "completed")
 
-    approved = start("Pay my contractor's $120 invoice", "Enforce")
+    approved = start("Buy me noise-cancelling headphones under $300", "Enforce")
     suspended = wait_run(approved, "awaiting_approval")
     approval_id = suspended["approvals"][0]["id"]
     request(f"/api/approvals/{approval_id}", {"approved": True})
@@ -61,7 +61,7 @@ def main():
     else:
         raise AssertionError("Approval was incorrectly consumed twice")
 
-    denied = start("Pay my contractor's $120 invoice", "Enforce")
+    denied = start("Buy me noise-cancelling headphones under $300", "Enforce")
     suspended = wait_run(denied, "awaiting_approval")
     request(f"/api/approvals/{suspended['approvals'][0]['id']}", {"approved": False})
     wait_run(denied, "completed")
@@ -86,8 +86,8 @@ def main():
     scenario_rows = off_rows + on_rows + approved_rows + denied_rows
     blocked_total = sum((Decimal(str(row["amount"])) for row in scenario_rows if row["status"] in {"blocked", "denied"}), Decimal(0))
     accepted_total = sum((Decimal(str(row["amount"])) for row in scenario_rows if row["status"] == "succeeded"), Decimal(0))
-    assert blocked_total == Decimal("620.00")
-    assert accepted_total == Decimal("659.98")
+    assert blocked_total == Decimal("749.99")
+    assert accepted_total == Decimal("789.97")
     print(json.dumps({"result": "passed", "verified": ["monitor", "enforce", "local_wallet", "approve", "deny", "single_use_approval", "audit"], "audit_rows": len(off_rows + on_rows + approved_rows + denied_rows)}, indent=2))
 
 

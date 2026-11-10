@@ -7,7 +7,7 @@ that toolkit schema), without the toolkit's requests-based logging client or an
 agent framework. Payouts use REST because the toolkit has no payout tool.
 
 Toolkit Invoicing creates bills or records payments already collected; it does
-not send money to a contractor, so that scene remains a REST payout. Creating
+not transfer funds, so payout calls use the REST adapter. Creating
 an order does not capture payment; accepting a payout batch is not settlement.
 """
 import asyncio
