@@ -144,3 +144,24 @@ def test_unsupported_tool_or_currency_fails_before_network():
         finally:
             await client.close()
     asyncio.run(scenario())
+
+
+def test_definitive_paypal_rejection_is_reported_as_failed_not_unknown():
+    import asyncio, httpx
+    from decimal import Decimal
+    from airlock.paypal import SandboxPayPal
+    from firewall.models import ToolCall
+
+    def handler(request):
+        if request.url.path == "/v1/oauth2/token":
+            return httpx.Response(200, json={"access_token":"t","expires_in":3600})
+        return httpx.Response(422, json={"name":"INSUFFICIENT_FUNDS","message":"Sender does not have sufficient funds."})
+
+    paypal = SandboxPayPal("id", "secret", transport=httpx.MockTransport(handler))
+    call = ToolCall(tool="create_payout", amount=Decimal("5.00"), payee="a@example.com", description="x")
+    try:
+        asyncio.run(paypal.execute(call, "req-1"))
+    except httpx.HTTPStatusError as exc:
+        assert "INSUFFICIENT_FUNDS" in exc.provider_rejection
+    else:
+        raise AssertionError("expected rejection")

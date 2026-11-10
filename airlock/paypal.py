@@ -86,6 +86,14 @@ class SandboxPayPal:
         token = await self._access_token()
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "PayPal-Request-Id": request_id}
         response = await self.client.post(uri, headers=headers, json=payload)
+        if 400 <= response.status_code < 500 and response.status_code not in (401, 408, 409, 429):
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            error = httpx.HTTPStatusError(f"PayPal rejected request: {response.status_code}", request=response.request, response=response)
+            error.provider_rejection = " ".join(part for part in (body.get("name"), body.get("message")) if part) or f"HTTP {response.status_code}"
+            raise error
         response.raise_for_status()
         return response.json()
 

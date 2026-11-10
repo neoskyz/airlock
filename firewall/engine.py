@@ -282,7 +282,13 @@ class Firewall:
         except asyncio.CancelledError:
             self.audit.update(audit_id,status="unknown",reason="Execution interrupted; verify PayPal before retrying")
             raise
-        except Exception:
+        except Exception as exc:
+            rejection = getattr(exc, "provider_rejection", None)
+            if rejection:
+                # The provider definitively refused the request: no money moved, and failed rows do not count toward budgets.
+                self.audit.update(audit_id,status="failed",reason=f"PayPal rejected the payment: {rejection}")
+                await send(type="tool_result",id=audit_id+":error",decision="ALLOW",status="failed",message=f"PayPal rejected the payment: {rejection}",**outcome,**details)
+                return {"decision":"ALLOW","status":"failed","error":f"PayPal rejected the payment: {rejection}",**outcome}
             self.audit.update(audit_id,status="unknown",reason="PayPal call failed or outcome unknown; verify sandbox before retrying")
             await send(type="tool_result",id=audit_id+":error",decision="ALLOW",status="unknown",message="PayPal call failed or outcome unknown. Verify sandbox before retrying.",**outcome,**details)
             return {"decision":"ALLOW","status":"unknown","error":"PayPal call failed or outcome unknown",**outcome}
