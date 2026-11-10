@@ -49,9 +49,20 @@ class ApprovalManager:
             approved = await future
             card["status"] = "approved" if approved else "denied"
             return approved
+        except asyncio.CancelledError:
+            card["status"] = "cancelled"
+            raise
         finally:
             self.pending.pop(identifier, None)
-            run.status = "running"
+            if run.status != "cancelled":
+                run.status = "running"
+
+    def cancel_run(self, run):
+        for card in run.approvals:
+            item = self.pending.pop(card["id"], None)
+            if item:
+                card["status"] = "cancelled"
+                item[0].cancel()
 
     def resolve(self, identifier, approved):
         item = self.pending.get(identifier)

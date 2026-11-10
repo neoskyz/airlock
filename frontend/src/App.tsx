@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AllCommunityModule, ModuleRegistry, themeQuartz, type ColDef, type ICellRendererParams } from 'ag-grid-community';
 import { AgGridReact } from 'ag-grid-react';
-import { request } from './api';
+import { ApiError, request } from './api';
+import { displayText, isRunActive, updateFailure } from './runUpdates';
 import type { AgentMode, Approval, Audit, AuditRow, Config, Run, TimelineEvent } from './types';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 const money = (value: string | number | undefined) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value || 0));
 const purchase = 'Buy me a USB-C charger under $40';
 const contractor = 'Also pay my contractor $120 invoice';
-const agentModeLabel = (mode: AgentMode, model?: string, provider?: string) => mode === 'compromised'
+const agentModeLabel = (mode: AgentMode, model?: string) => mode === 'compromised'
   ? 'Agent: simulated compromised (scripted)'
-  : `Agent: ${model || 'connecting…'} (live)${provider ? ` · ${provider}` : ''}`;
+  : `Agent: ${model || 'connecting…'} (live)`;
 const gridTheme = themeQuartz.withParams({
   backgroundColor: '#13191d', foregroundColor: '#d8e2e7', headerBackgroundColor: '#1b2329',
   headerTextColor: '#95a6af', borderColor: '#29343b', accentColor: '#a3efbe',
@@ -32,7 +33,7 @@ function TimelineCard({ event, index }: { event: TimelineEvent; index: number })
     <div className="timeline-node">{event.decision === 'BLOCK' ? '×' : event.decision === 'REQUIRE_APPROVAL' ? '!' : event.paypal_id ? '✓' : index + 1}</div>
     <div className="event-topline"><code>{event.tool || (event.type === 'provenance' ? 'provenance.capture' : event.type.replaceAll('_', '.'))}</code><DecisionPill decision={event.decision || (event.type === 'tool_result' ? 'EXECUTED' : undefined)}/></div>
     {(event.amount !== undefined || event.payee) && <div className="event-payment"><strong>{money(event.amount)}</strong><span>→</span><span className="payee">{event.payee}</span></div>}
-    {(event.reason || event.message) && <p className="event-reason">{event.reason || event.message}</p>}
+    {(event.reason || event.message) && <p className="event-reason">{displayText(event.reason || event.message)}</p>}
     {event.suspicious_excerpt && <div className="taint-evidence"><span>UNTRUSTED TOOL OUTPUT · {event.source || 'product description'}</span><mark>{event.suspicious_excerpt}</mark></div>}
     <ExecutionState event={event}/>
   </article>;
@@ -42,7 +43,7 @@ function ApprovalCard({ approval, busy, onAnswer }: { approval: Approval; busy: 
     <div className="approval-eyebrow"><span className="amber-dot"/>HUMAN CHECKPOINT</div>
     <h3>Your approval is required</h3><p>The agent is paused before this payment executes.</p>
     <div className="approval-payment"><strong>{money(approval.amount)}</strong><span>{approval.payee}</span></div>
-    <div className="approval-reason">{approval.reason}</div>
+    <div className="approval-reason">{displayText(approval.reason)}</div>
     <div className="approval-actions"><button className="approve-button" onClick={() => onAnswer(approval.id, true)} disabled={busy}>✓ Approve payment</button><button className="deny-button" onClick={() => onAnswer(approval.id, false)} disabled={busy}>Deny</button></div>
   </section>;
 }
@@ -76,12 +77,14 @@ export function App() {
   const chatBottom = useRef<HTMLDivElement>(null);
   const timelineBottom = useRef<HTMLDivElement>(null);
   const inFlight = useRef(false);
+  const activeIdRef = useRef<string | null>(null);
+  const activityVersion = useRef(0);
   const activeRun = runs.find(run => run.id === activeId);
   const llmDegraded = Boolean(config?.llm_degraded || activeRun?.llm_degraded);
   const displayedMode = activeRun?.agent_mode || (llmDegraded ? 'compromised' : agentMode);
-  const displayedAgent = agentModeLabel(displayedMode, activeRun?.agent_model || config?.agent_model, activeRun?.agent_provider || config?.agent_provider);
+  const displayedAgent = agentModeLabel(displayedMode, activeRun?.agent_model || config?.agent_model);
   const displayedJudge = llmDegraded ? 'rules (daily LLM limit reached)' : activeRun?.judge_model || config?.judge_model;
-  const running = sending || Boolean(activeId && (!activeRun || ['running', 'awaiting_approval'].includes(activeRun.status)));
+  const running = sending || Boolean(activeId && (!activeRun || isRunActive(activeRun.status)));
   const pendingApprovals = activeRun?.approvals.filter(approval => ['pending', 'awaiting_approval'].includes(approval.status.toLowerCase())) || [];
   const allEvents = runs.flatMap(run => run.events.filter(event => event.type !== 'message').map(event => ({ ...event, runId: run.id })));
   const refreshAudit = useCallback(async () => {
@@ -110,23 +113,36 @@ export function App() {
   useEffect(() => {
     if (!activeId) return;
     let stopped = false;
+    let failures = 0;
     let timeout: ReturnType<typeof setTimeout>;
     const controller = new AbortController();
     const poll = async () => {
       try {
-        const run = await request<Run>(`/api/runs/${activeId}`, { signal: controller.signal });
-        if (stopped) return;
-        setError(current => current.startsWith('Live update failed:') ? '' : current);
+        const run = await request<Run>(`/api/runs/${activeId}`, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]) });
+        if (stopped || activeIdRef.current !== activeId) return;
+        failures = 0;
+        setError(current => current.startsWith('Live update failed.') ? '' : current);
         setRuns(current => current.some(item => item.id === run.id) ? current.map(item => item.id === run.id ? run : item) : [...current, run]);
-        if (run.status === 'completed' || run.status === 'failed') {
+        if (!isRunActive(run.status)) {
+          activeIdRef.current = null;
           setActiveId(null);
           void request<Config>('/api/config').then(setConfig).catch(() => {});
           await refreshAudit();
           return;
         }
       } catch (err) {
-        if (stopped) return;
-        setError(`Live update failed: ${(err as Error).message}. Retrying…`);
+        if (stopped || activeIdRef.current !== activeId) return;
+        const failure = updateFailure(err, ++failures);
+        setError(failure.message);
+        if (!failure.retry) {
+          activeIdRef.current = null;
+          setActiveId(null);
+          setAnswering(false);
+          setRuns(current => current.map(run => run.id === activeId ? {
+            ...run, status: 'failed', error: failure.message, approvals: [],
+          } : run));
+          return;
+        }
       }
       if (!stopped) timeout = setTimeout(poll, 700);
     };
@@ -140,24 +156,53 @@ export function App() {
 
   async function startRun(message: string, enabled = firewall) {
     if (!message.trim() || inFlight.current || running || !config) return;
+    activityVersion.current += 1;
     inFlight.current = true;
     setSending(true); setError(''); setFirewall(enabled); setTab('demo');
     try {
-      const { id } = await request<{ id: string }>('/api/runs', { method: 'POST', body: JSON.stringify({ message: message.trim(), firewall_enabled: enabled, agent_mode: agentMode }) });
+      const { id } = await request<{ id: string }>('/api/runs', { method: 'POST', signal: AbortSignal.timeout(10000), body: JSON.stringify({ message: message.trim(), firewall_enabled: enabled, agent_mode: agentMode }) });
       setRuns(current => [...current, { id, status: 'running', firewall_enabled: enabled, agent_mode: agentMode, agent_provider: agentMode === 'live' ? config.agent_provider : 'scripted', agent_model: agentMode === 'live' ? config.agent_model : 'Simulated compromised agent', judge_model: config.judge_model, messages: [{ role: 'user', content: message.trim() }], events: [], approvals: [] }]);
+      activeIdRef.current = id;
       setActiveId(id); setInput('');
     } catch (err) { setError(`Could not start the agent: ${(err as Error).message}`); }
     finally { setSending(false); inFlight.current = false; }
   }
   async function answerApproval(id: string, approved: boolean) {
-    if (answering) return;
+    if (answering || !activeIdRef.current) return;
+    const version = activityVersion.current;
     setAnswering(true); setError('');
     try {
-      await request(`/api/approvals/${id}`, { method: 'POST', body: JSON.stringify({ approved }) });
+      await request(`/api/approvals/${id}`, { method: 'POST', signal: AbortSignal.timeout(10000), body: JSON.stringify({ approved }) });
+      if (version !== activityVersion.current) return;
       setRuns(current => current.map(run => ({ ...run, approvals: run.approvals.map(approval => approval.id === id ? { ...approval, status: approved ? 'approved' : 'denied' } : approval) })));
       void refreshAudit();
-    } catch (err) { setError(`Approval failed: ${(err as Error).message}`); }
-    finally { setAnswering(false); }
+    } catch (err) { if (version === activityVersion.current) setError(`Approval failed: ${(err as Error).message}`); }
+    finally { if (version === activityVersion.current) setAnswering(false); }
+  }
+  async function cancelRun() {
+    const id = activeIdRef.current;
+    if (!id) return;
+    const version = ++activityVersion.current;
+    activeIdRef.current = null;
+    setActiveId(null);
+    setAnswering(false);
+    setError('');
+    setRuns(current => current.map(run => run.id === id ? {
+      ...run, status: 'cancelled', approvals: [],
+    } : run));
+    try {
+      const run = await request<Run>(`/api/runs/${id}/cancel`, {
+        method: 'POST', signal: AbortSignal.timeout(10000),
+      });
+      setRuns(current => current.map(item => item.id === id ? run : item));
+      void refreshAudit();
+    } catch (err) {
+      const message = err instanceof ApiError && err.status === 404
+        ? updateFailure(err, 1).message
+        : 'Cancellation could not be confirmed. The server may still be processing this run; check the audit log before repeating a payment.';
+      setRuns(current => current.map(run => run.id === id ? { ...run, status: 'failed', error: message } : run));
+      if (version === activityVersion.current) setError(message);
+    }
   }
   const columns = useMemo<ColDef<AuditRow>[]>(() => [
     { field: 'timestamp', headerName: 'Time', minWidth: 155, valueFormatter: ({ value }) => value ? new Date(value).toLocaleTimeString('en-US', { hour12: false }) : '', tooltipField: 'timestamp' },
@@ -172,7 +217,7 @@ export function App() {
     { field: 'mock', headerName: 'Provider', minWidth: 125, valueFormatter: ({ value }) => value ? 'MOCK' : 'SANDBOX' },
     { field: 'firewall_enabled', headerName: 'Firewall', minWidth: 120, valueFormatter: ({ value }) => value ? 'ON' : 'OFF' },
   ], []);
-  const filteredRows = audit.rows.filter(row => decisionFilter === 'ALL' || row.decision === decisionFilter);
+  const filteredRows = audit.rows.map(row => ({ ...row, reason: displayText(row.reason) })).filter(row => decisionFilter === 'ALL' || row.decision === decisionFilter);
   const totalDecisions = audit.rows.length;
   const mock = config?.paypal_mode?.toLowerCase().includes('mock');
 
@@ -181,19 +226,19 @@ export function App() {
     <main>
       <div className="page-heading"><div><div className="eyebrow"><span className="live-dot"/>AGENTIC COMMERCE, WITH GUARDRAILS</div><h1>Good intent. <span>Safer payments.</span></h1><p>One poisoned product page should never become a payment instruction.</p></div><div className="hackathon-mark"><span>POWERED BY</span><b>PayPal Agent Toolkit</b><small>REAL SANDBOX API CALLS</small></div></div>
       <div className="workspace-bar"><nav aria-label="Workspace"><button className={tab === 'demo' ? 'selected' : ''} onClick={() => setTab('demo')}><span>◈</span> Agent workspace</button><button className={tab === 'audit' ? 'selected' : ''} onClick={() => setTab('audit')}><span>▤</span> Audit log <b>{totalDecisions}</b></button></nav><span className="workspace-note">Policy + intent review + human approval</span></div>
-      {error && <div className="error-banner" role="alert"><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
+      {error && <div className="error-banner" role="alert"><span>{displayText(error)}</span><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
       {llmDegraded && <div className="mock-notice" role="status"><span>LLM LIMIT</span> Today's AI call limit has been reached. New runs use a scripted agent and rule judge until the next UTC day. An active live run stops before its next model call to avoid replaying payments.</div>}
       {mock && <div className="mock-notice"><span>MOCK</span> No PayPal credentials configured. Payments are simulated; IDs are clearly labeled. No money moves.</div>}
       {tab === 'demo' ? <>
         <section className="agent-mode-bar" aria-label="Agent mode">
-          <label htmlFor="agent-mode">AGENT MODE<select id="agent-mode" value={agentMode} disabled={running || !config} onChange={event => setAgentMode(event.target.value as AgentMode)} aria-describedby="agent-mode-detail"><option value="live" disabled={!config?.live_available}>Live {config?.agent_provider || "AI"} agent</option><option value="compromised">Simulated compromised agent</option></select></label>
-          <p id="agent-mode-detail">{agentMode === 'compromised' ? 'Replays a successful injection to make firewall decisions reproducible.' : 'The live model chooses its own tool calls and may resist the injected checkout policy.'}<span>Intent judge: {displayedJudge || 'connecting…'}{config && !config.live_available && !llmDegraded ? ` · Live mode requires ${config.agent_provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY'}.` : ''}</span></p>
+          <label htmlFor="agent-mode">AGENT MODE<select id="agent-mode" value={agentMode} disabled={running || !config} onChange={event => setAgentMode(event.target.value as AgentMode)} aria-describedby="agent-mode-detail"><option value="live" disabled={!config?.live_available}>Live AI agent</option><option value="compromised">Simulated compromised agent</option></select></label>
+          <p id="agent-mode-detail">{agentMode === 'compromised' ? 'Replays a successful injection to make firewall decisions reproducible.' : 'The live model chooses its own tool calls and may resist the injected checkout policy.'}<span>Intent judge: {displayedJudge || 'connecting…'}{config && !config.live_available && !llmDegraded ? ' · Live mode requires an API key.' : ''}</span></p>
         </section>
         <section className="scenario-strip" aria-label="Demo scenarios"><span className="scenario-label">TRY A SCENARIO</span><button disabled={running || !config} onClick={() => void startRun(purchase, false)}><span className="scenario-number">01</span>Attack · firewall off <span className="scenario-arrow">↗</span></button><button disabled={running || !config} onClick={() => void startRun(purchase, true)}><span className="scenario-number">02</span>Attack · firewall on <span className="scenario-arrow">↗</span></button><button disabled={running || !config} onClick={() => void startRun(contractor, true)}><span className="scenario-number">03</span>Contractor approval <span className="scenario-arrow">↗</span></button></section>
-        <div className="workspace-grid"><section className="chat-panel panel"><div className="panel-header"><div className="panel-title"><span className="agent-avatar">A</span><div><h2>Shopping & payments agent</h2><p>{config ? displayedAgent : 'Connecting to agent'}</p></div></div><span className="panel-kicker">CONVERSATION</span></div>
+        <div className="workspace-grid"><section className="chat-panel panel"><div className="panel-header"><div className="panel-title"><span className="agent-avatar">A</span><div><h2>Shopping & payments agent</h2><p>{config ? displayedAgent : 'Connecting to agent'}</p></div></div><div className="run-controls">{activeId && <button type="button" className="secondary-button cancel-button" onClick={() => void cancelRun()}>Cancel</button>}<span className="panel-kicker">CONVERSATION</span></div></div>
           <div className="conversation" aria-live="polite" aria-relevant="additions text">
             {!runs.length && <div className="empty-chat"><div className="empty-shield"><Shield/></div><h3>Your agent can act.<br/>You set the boundaries.</h3><p>Ask it to buy a charger. See how the firewall handles an instruction hidden in a product page.</p><div className="empty-capabilities"><span>✓ Intent verification</span><span>✓ Source tracing</span><span>✓ Payment approvals</span></div></div>}
-            {runs.map((run, runIndex) => <div className="chat-run" key={run.id}><div className="run-separator"><span>RUN {String(runIndex + 1).padStart(2, '0')}</span><span className="run-agent-mode">{agentModeLabel(run.agent_mode, run.agent_model, run.agent_provider)}</span><span className={run.firewall_enabled ? 'protected-label' : 'unprotected-label'}>{run.firewall_enabled ? '◉ FIREWALL ON' : '○ FIREWALL OFF'}</span></div>{run.messages.map((message, messageIndex) => <div key={`${run.id}-${messageIndex}`} className={`chat-message ${message.role}`}><div className="message-avatar">{message.role === 'user' ? 'U' : 'A'}</div><div><span className="message-author">{message.role === 'user' ? 'You' : 'Agent'}</span><p>{message.content}</p></div></div>)}<ProductEvidence run={run}/>{run.error && <p className="run-error">{run.error}</p>}{run.status === 'running' && <div className="agent-thinking"><span/><span/><span/>Agent is working…</div>}</div>)}
+            {runs.map((run, runIndex) => <div className="chat-run" key={run.id}><div className="run-separator"><span>RUN {String(runIndex + 1).padStart(2, '0')}</span><span className="run-agent-mode">{agentModeLabel(run.agent_mode, run.agent_model)}</span><span className={run.firewall_enabled ? 'protected-label' : 'unprotected-label'}>{run.firewall_enabled ? '◉ FIREWALL ON' : '○ FIREWALL OFF'}</span></div>{run.messages.map((message, messageIndex) => <div key={`${run.id}-${messageIndex}`} className={`chat-message ${message.role}`}><div className="message-avatar">{message.role === 'user' ? 'U' : 'A'}</div><div><span className="message-author">{message.role === 'user' ? 'You' : 'Agent'}</span><p>{displayText(message.content)}</p></div></div>)}<ProductEvidence run={run}/>{run.error && <p className="run-error">{displayText(run.error)}</p>}{run.status === 'cancelled' && <p className="run-cancelled">Run cancelled. Payments already submitted are unchanged.</p>}{run.status === 'running' && <div className="agent-thinking"><span/><span/><span/>Agent is working…</div>}</div>)}
             {pendingApprovals.map(approval => <ApprovalCard key={approval.id} approval={approval} busy={answering} onAnswer={(id, approved) => void answerApproval(id, approved)}/>)}<div ref={chatBottom}/>
           </div>
           <form className="composer" onSubmit={event => { event.preventDefault(); void startRun(input); }}><label className="sr-only" htmlFor="agent-message">Message the agent</label><textarea id="agent-message" placeholder="Ask your agent to make a payment…" rows={2} value={input} disabled={running} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void startRun(input); } }}/><div className="composer-footer"><span>{running ? (pendingApprovals.length ? 'Paused · waiting for your approval' : 'Processing your request…') : 'Enter to send · Shift + Enter for a new line'}</span><button type="submit" aria-label="Send message" disabled={running || !input.trim() || !config}>↑</button></div></form>

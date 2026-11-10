@@ -48,7 +48,7 @@ export interface Approval {
 }
 export interface Run {
   id: string;
-  status: 'running' | 'awaiting_approval' | 'completed' | 'failed';
+  status: 'running' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled';
   firewall_enabled: boolean;
   agent_mode: AgentMode;
   agent_provider: AgentProvider | 'scripted';

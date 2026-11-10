@@ -43,6 +43,15 @@ class AuditStore:
         self.connection.commit()
         return identifier
 
+    def record_run_cancellation(self, run_id, enabled, mock):
+        """Record cancellation even if no payment has yet been proposed."""
+        now = datetime.now(timezone.utc)
+        self.connection.execute("INSERT INTO audit VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            uuid4().hex, now.isoformat(), run_id, "cancel_run", 0, "USD", "—",
+            "BLOCK", "Run cancelled by user; submitted PayPal calls are not rolled back",
+            None, "cancelled", int(mock), int(enabled), "", "user", "[]", None, now.date().isoformat()))
+        self.connection.commit()
+
     def update(self, identifier, **values):
         if not values or not set(values) <= {"status","decision","reason","paypal_id","paypal_status","reserved_day"}:
             raise ValueError("Invalid audit update")

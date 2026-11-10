@@ -45,7 +45,7 @@ def create_app(settings=None, *, paypal=None, judge=None):
     firewall = Firewall(policy,judge,audit)
     approvals = ApprovalManager()
     agent = DemoAgent(settings,firewall,paypal,approvals,budget=budget)
-    runs, tasks = {}, set()
+    runs, tasks, run_tasks = {}, set(), {}
 
     @asynccontextmanager
     async def lifespan(app):
@@ -94,7 +94,11 @@ def create_app(settings=None, *, paypal=None, judge=None):
         runs[run.id] = run
         task = asyncio.create_task(agent.run(run))
         tasks.add(task)
-        task.add_done_callback(tasks.discard)
+        run_tasks[run.id] = task
+        def finished(done):
+            tasks.discard(done)
+            run_tasks.pop(run.id, None)
+        task.add_done_callback(finished)
         return {"id":run.id}
 
     @app.get("/api/runs/{identifier}")
@@ -106,6 +110,23 @@ def create_app(settings=None, *, paypal=None, judge=None):
         modes = runtime_modes()
         if run.status in {"running", "awaiting_approval"}:
             run.judge_mode, run.llm_degraded, run.judge_model = modes["judge_mode"], modes["llm_degraded"], modes["judge_model"]
+        return run.snapshot()
+
+    @app.post("/api/runs/{identifier}/cancel")
+    async def cancel_run(identifier: str):
+        run = runs.get(identifier)
+        if run is None:
+            raise HTTPException(404,"Run not found")
+        if run.status in {"running", "awaiting_approval"}:
+            # No await before cancellation: approval resolution cannot interleave here.
+            run.status = "cancelled"
+            approvals.cancel_run(run)
+            audit.record_run_cancellation(run.id, run.firewall_enabled, paypal.mock)
+            task = run_tasks.get(identifier)
+            if task is not None:
+                task.cancel()
+            await run.say("Run cancelled. Submitted PayPal calls are not rolled back; check the sandbox before retrying a payment.")
+            await run.emit({"type":"cancelled", "status":"cancelled", "message":"Run cancelled by user."})
         return run.snapshot()
 
     @app.post("/api/approvals/{identifier}")

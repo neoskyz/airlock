@@ -160,7 +160,7 @@ class DemoAgent:
             requested_mode = run.agent_mode
             run.agent_mode = self.settings.resolve_agent_mode(requested_mode)
             if requested_mode == "live" and run.agent_mode != "live":
-                await run.say(f"Live {self.settings.agent_provider} agent unavailable without {self.settings.agent_key_name}; using Simulated compromised agent.")
+                await run.say("Live AI agent unavailable without an API key; using Simulated compromised agent.")
             self.update_modes(run)
             if run.llm_degraded:
                 run.agent_mode = "compromised"
@@ -171,8 +171,9 @@ class DemoAgent:
             self.update_modes(run)
             run.status = "completed"
         except asyncio.CancelledError:
-            run.status = "failed"
-            run.error = "Server stopped; do not replay payments without checking PayPal."
+            if run.status != "cancelled":
+                run.status = "failed"
+                run.error = "Server stopped; do not replay payments without checking PayPal."
             raise
         except Exception:
             run.status = "failed"
