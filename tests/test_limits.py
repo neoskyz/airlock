@@ -72,7 +72,7 @@ def test_failed_judge_attempt_consumes_budget_and_only_quota_uses_rules():
         judge = build_judge("test-key", SimpleNamespace(messages=SimpleNamespace(create=create)), budget=budget)
         call = ToolCall(tool="create_order", amount=29, payee="shop@chargers.example", description="charger")
         provenance = Provenance("Buy me a USB-C charger under $40")
-        assert (await judge.judge(call, provenance)).decision == "BLOCK"
+        assert (await judge.judge(call, provenance)).decision == "REQUIRE_APPROVAL"
         assert budget.snapshot()["llm_calls_used"] == 1
         assert (await judge.judge(call, provenance)).decision == "ALLOW"
         assert create.await_count == 1
@@ -87,10 +87,14 @@ def test_mid_live_shared_budget_stops_without_replaying_payment(tmp_path, provid
         order = SimpleNamespace(type="tool_use", name="create_order", input=args, id="order-1",
             model_dump=lambda **kwargs:{"type":"tool_use","name":"create_order","input":args,"id":"order-1"})
         agent_create = AsyncMock(return_value=SimpleNamespace(content=[order]))
-        judge_create = AsyncMock(return_value=SimpleNamespace(content=[SimpleNamespace(type="text",text='{"decision":"ALLOW","reason":"authorized","source":"user:0","suspicious_excerpt":""}')]))
+        judge_create = AsyncMock(return_value=SimpleNamespace(content=[SimpleNamespace(type="text",text='{"decision":"ALLOW","reason":"authorized","source":"user:0","suspicious_excerpt":"","score_adjustment":0}')]))
         judge = build_judge("test-key",SimpleNamespace(messages=SimpleNamespace(create=judge_create)),budget=budget)
         audit = AuditStore(str(tmp_path/"audit.sqlite3"))
-        firewall = Firewall(Policy.load("policies/default.yaml"), judge, audit)
+        policy = Policy.load("policies/default.yaml")
+        # This test exercises shared agent/reviewer budget exhaustion. Put the
+        # order in the gray zone; low-risk orders now correctly skip the judge.
+        policy.auto_approve_threshold = 10
+        firewall = Firewall(policy, judge, audit)
         paypal = MockPayPal()
         paypal.execute = AsyncMock(wraps=paypal.execute)
         if provider == "openai":
@@ -104,6 +108,8 @@ def test_mid_live_shared_budget_stops_without_replaying_payment(tmp_path, provid
         agent = DemoAgent(Settings(agent_provider=provider, openai_api_key="test-key", anthropic_api_key="test-key"), firewall, paypal, ApprovalManager(),
             client=client,budget=budget)
         run = Run("Buy me a USB-C charger under $40",True,agent_mode="live")
+        # The host has already opened this catalog product before checkout.
+        run.selected_product = {"id":"budget-test-charger", "category":"electronics"}
         await agent.run(run)
         assert run.status == "completed"
         assert run.agent_mode == "live"  # Preserve the identity of the agent that actually ran.

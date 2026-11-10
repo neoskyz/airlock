@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -10,6 +11,9 @@ AgentProvider = Literal["openai", "anthropic"]
 
 @dataclass
 class Settings:
+    channel3_api_key: str = ""
+    sandbox_starting_balance: Decimal = Decimal("10000.00")
+    initial_mode: str = "Monitor"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     paypal_client_id: str = ""
@@ -29,6 +33,11 @@ class Settings:
     frontend_dist: str = str(ROOT / "frontend/dist")
 
     def __post_init__(self):
+        self.sandbox_starting_balance = Decimal(str(self.sandbox_starting_balance))
+        if not self.sandbox_starting_balance.is_finite() or self.sandbox_starting_balance < 0:
+            raise ValueError("SANDBOX_STARTING_BALANCE must be finite and nonnegative")
+        if self.initial_mode not in {"Monitor", "Enforce"}:
+            raise ValueError("AIRLOCK_MODE must be Monitor or Enforce")
         if self.agent_provider not in {"openai", "anthropic"}:
             raise ValueError("AGENT_PROVIDER must be openai or anthropic")
         if not self.agent_model:
@@ -62,6 +71,9 @@ class Settings:
     def from_env(cls):
         # The startup script may load .env. Application code reads process env only.
         return cls(
+            channel3_api_key=os.getenv("CHANNEL3_API_KEY", ""),
+            sandbox_starting_balance=Decimal(os.getenv("SANDBOX_STARTING_BALANCE", "10000.00")),
+            initial_mode=os.getenv("AIRLOCK_MODE", "Monitor"),
             run_rate_limit_per_minute=int(os.getenv("RUN_RATE_LIMIT_PER_MINUTE", "5")),
             run_rate_limit_per_hour=int(os.getenv("RUN_RATE_LIMIT_PER_HOUR", "30")),
             daily_llm_call_limit=int(os.getenv("DAILY_LLM_CALL_LIMIT", "500")),

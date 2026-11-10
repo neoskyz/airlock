@@ -40,3 +40,16 @@ def test_invalid_agent_mode_rejected():
 def test_invalid_agent_provider_rejected():
     with pytest.raises(ValueError, match="AGENT_PROVIDER"):
         Settings(agent_provider="unknown")
+
+
+def test_channel3_wallet_and_mode_environment(monkeypatch):
+    monkeypatch.setenv("CHANNEL3_API_KEY", "test-catalog-key")
+    monkeypatch.setenv("SANDBOX_STARTING_BALANCE", "4000.50")
+    monkeypatch.setenv("AIRLOCK_MODE", "Enforce")
+    settings = Settings.from_env()
+    assert settings.channel3_api_key == "test-catalog-key"
+    assert str(settings.sandbox_starting_balance) == "4000.50"
+    assert settings.initial_mode == "Enforce"
+    for kwargs in [{"initial_mode":"Off"},{"sandbox_starting_balance":"NaN"},{"sandbox_starting_balance":"-1"}]:
+        with pytest.raises(ValueError):
+            Settings(**kwargs)

@@ -17,7 +17,7 @@ def poll(client,identifier,status="completed"):
 
 
 def test_all_demo_scenarios_and_approval_single_consumption(tmp_path):
-    settings=Settings(sqlite_path=str(tmp_path/"audit.sqlite3"),demo_mode=True,frontend_dist=str(tmp_path))
+    settings=Settings(initial_mode="Enforce",sqlite_path=str(tmp_path/"audit.sqlite3"),demo_mode=True,frontend_dist=str(tmp_path))
     with TestClient(create_app(settings,paypal=MockPayPal(),judge=RuleJudge())) as client:
         assert client.get("/api/health").status_code==200
         assert client.get("/api/config").json()["paypal_mode"]=="MOCK"
@@ -36,13 +36,13 @@ def test_all_demo_scenarios_and_approval_single_consumption(tmp_path):
         final=poll(client,contractor)
         assert final["approvals"][0]["status"]=="approved"
         audit=client.get("/api/audit").json()
-        assert len(audit["rows"])==5
-        assert audit["stats"]=={"blocked_amount":500,"allowed_amount":678}
-        assert all(row["mock"] for row in audit["rows"])
+        assert len([r for r in audit["rows"] if r["tool"] in {"create_order", "create_payout"}])==5
+        assert audit["stats"]=={"blocked_amount":500,"allowed_amount":659.98}
+        assert all(row["mock"] for row in audit["rows"] if row["tool"] in {"create_order", "create_payout"})
 
 
 def test_agent_mode_api_validation_and_honest_no_key_fallback(tmp_path):
-    settings=Settings(sqlite_path=str(tmp_path/"modes.sqlite3"), frontend_dist=str(tmp_path))
+    settings=Settings(initial_mode="Enforce",sqlite_path=str(tmp_path/"modes.sqlite3"), frontend_dist=str(tmp_path))
     with TestClient(create_app(settings,paypal=MockPayPal(),judge=RuleJudge())) as client:
         config=client.get("/api/config").json()
         assert config["agent_mode"] == "compromised"
@@ -52,7 +52,7 @@ def test_agent_mode_api_validation_and_honest_no_key_fallback(tmp_path):
         run=poll(client,identifier)
         assert run["agent_mode"] == "compromised"
         assert any("Live AI agent unavailable" in message["content"] for message in run["messages"])
-        assert any("Simulated compromised agent" in message["content"] for message in run["messages"])
+        assert any("Scripted agent" in message["content"] for message in run["messages"])
 
 
 def test_api_default_mode_and_live_selection_with_legacy_demo_mode(tmp_path):
@@ -93,7 +93,7 @@ def test_cancel_pending_approval_is_audited_and_unlocks_new_run(tmp_path):
     from unittest.mock import AsyncMock
     paypal = MockPayPal()
     paypal.execute = AsyncMock(wraps=paypal.execute)
-    settings = Settings(sqlite_path=str(tmp_path/"cancel.sqlite3"), demo_mode=True)
+    settings = Settings(initial_mode="Enforce",sqlite_path=str(tmp_path/"cancel.sqlite3"), demo_mode=True)
     with TestClient(create_app(settings, paypal=paypal, judge=RuleJudge())) as client:
         identifier = client.post("/api/runs", json={"message":"Also pay my contractor $120 invoice"}).json()["id"]
         pending = poll(client, identifier, "awaiting_approval")
@@ -117,7 +117,7 @@ def test_cancel_pending_approval_is_audited_and_unlocks_new_run(tmp_path):
 
 
 def test_missing_run_get_and_cancel_return_404(tmp_path):
-    settings = Settings(sqlite_path=str(tmp_path/"missing.sqlite3"))
+    settings = Settings(initial_mode="Enforce",sqlite_path=str(tmp_path/"missing.sqlite3"))
     with TestClient(create_app(settings, paypal=MockPayPal(), judge=RuleJudge())) as client:
         for response in (client.get("/api/runs/server-restarted"), client.post("/api/runs/server-restarted/cancel")):
             assert response.status_code == 404
@@ -137,7 +137,7 @@ def test_cancel_during_execution_preserves_unknown_outcome_and_stops_next_paymen
             await asyncio.Event().wait()
 
     paypal = SubmittedPayPal()
-    settings = Settings(sqlite_path=str(tmp_path/"executing.sqlite3"), demo_mode=True)
+    settings = Settings(initial_mode="Enforce",sqlite_path=str(tmp_path/"executing.sqlite3"), demo_mode=True)
     with TestClient(create_app(settings, paypal=paypal, judge=RuleJudge())) as client:
         identifier = client.post("/api/runs", json={"message":"Buy me a USB-C charger under $40", "firewall_enabled":False}).json()["id"]
         assert paypal.submitted.wait(3)
@@ -158,7 +158,7 @@ def test_cancel_before_payment_and_after_approval_resolution_race(tmp_path):
     from airlock.app import ApprovalChoice
 
     async def scenario():
-        settings = Settings(sqlite_path=str(tmp_path/"race.sqlite3"), demo_mode=True)
+        settings = Settings(initial_mode="Enforce",sqlite_path=str(tmp_path/"race.sqlite3"), demo_mode=True)
         paypal = MockPayPal()
         paypal.execute = AsyncMock(wraps=paypal.execute)
         app = create_app(settings, paypal=paypal, judge=RuleJudge())
@@ -190,3 +190,191 @@ def test_cancel_before_payment_and_after_approval_resolution_race(tmp_path):
                 rows = (await client.get("/api/audit")).json()["rows"]
                 assert all(row["status"] == "cancelled" for row in rows)
     asyncio.run(scenario())
+
+
+def test_redesigned_routes_shared_mode_policy_audit_and_wallet(tmp_path):
+    from decimal import Decimal
+    (tmp_path/"index.html").write_text("<html>Airlock</html>")
+    app = create_app(Settings(sqlite_path=str(tmp_path/"redesign.sqlite3"), frontend_dist=str(tmp_path)), paypal=MockPayPal(), judge=RuleJudge())
+    with TestClient(app) as client:
+        assert client.get("/", follow_redirects=False).headers["location"] == "/console"
+        for path in ["/client","/console","/docs"]:
+            response = client.get(path)
+            assert response.status_code == 200
+            assert response.text == "<html>Airlock</html>"
+        assert client.get("/not-a-page").status_code == 404
+        assert client.get("/assets/missing.js").status_code == 404
+        assert client.get("/api/mode").json() == {"mode":"Monitor"}
+        assert client.get("/api/wallet").json()["balance"] == "10000.00"
+        first = client.post("/api/runs", json={"message":"Buy me a USB-C charger under $40"}).json()["id"]
+        poll(client, first)
+        assert client.get("/api/wallet").json()["balance"] == "9480.01"
+        assert client.patch("/api/mode",json={"mode":"Enforce"}).json() == {"mode":"Enforce"}
+        second = client.post("/api/runs",json={"message":"Buy me a USB-C charger under $40"}).json()["id"]
+        poll(client, second)
+        assert client.get("/api/wallet").json()["balance"] == "9460.02"
+        policy = client.get("/api/policies").json()
+        policy["single_transaction_limit"] = "200"
+        assert client.patch("/api/policies",json=policy).status_code == 200
+        assert Decimal(client.get("/api/policies").json()["single_transaction_limit"]) == 200
+        assert client.patch("/api/policies",json={"single_transaction_limit":-1}).status_code == 422
+        assert client.patch("/api/mode",json={"mode":"Off"}).status_code == 422
+        rows = client.get("/api/audit").json()["rows"]
+        assert any(row["tool"] in {"mode_updated", "policy_updated"} for row in rows)
+
+
+def test_sse_state_initial_snapshot_cross_tab_changes_and_safe_client_projection(tmp_path):
+    import asyncio
+    import json
+    from airlock.store import Run
+    from airlock.catalog import INJECTION
+    class Connected:
+        async def is_disconnected(self):
+            return False
+    async def scenario():
+        app = create_app(Settings(sqlite_path=str(tmp_path/"sse.sqlite3")),paypal=MockPayPal(),judge=RuleJudge())
+        async with app.router.lifespan_context(app):
+            stream1 = app.state.event_stream(Connected(), "console")
+            stream2 = app.state.event_stream(Connected(), "console")
+            parse = lambda event:json.loads(event.split("data: ",1)[1].strip())
+            initial1 = parse(await anext(stream1))
+            initial2 = parse(await anext(stream2))
+            assert initial1 == initial2 and initial1["config"]["mode"] == "Monitor"
+            from airlock.app import ModeChoice
+            change_mode = next(route.endpoint for route in app.routes if getattr(route,"path",None) == "/api/mode" and "PATCH" in route.methods)
+            await change_mode(ModeChoice(mode="Enforce"))
+            mode1 = parse(await anext(stream1))
+            mode2 = parse(await anext(stream2))
+            assert mode1 == mode2 and mode1["config"]["mode"] == "Enforce"
+            endpoint = next(route.endpoint for route in app.routes if getattr(route,"path",None) == "/api/events")
+            response = await endpoint(Connected(), "client")
+            assert response.media_type == "text/event-stream" and response.headers["x-accel-buffering"] == "no"
+            assert parse(await anext(response.body_iterator))["audit"]["rows"] == []
+            await response.body_iterator.aclose()
+            run = Run("Buy me a USB-C charger under $40", True)
+            app.state.runs[run.id] = run
+            await app.state.agent.products(run)
+            await app.state.agent.open_product(run, "marketplace-volt-30w")
+            await run.emit({"type":"decision","decision":"BLOCK","status":"blocked","risk_score":92,"factors":[{"name":"taint","points":32}],"suspicious_excerpt":INJECTION,"message":"Tool-only instructions"})
+            update1 = parse(await anext(stream1))
+            update2 = parse(await anext(stream2))
+            assert update1 == update2 and update1["runs"][0]["events"][-1]["risk_score"] == 92
+            client_state = await app.state.snapshot("client")
+            serialized = json.dumps(client_state)
+            assert "risk_score" not in serialized and "suspicious_excerpt" not in serialized and INJECTION not in serialized
+            assert "agent_provider" not in serialized and "judge_model" not in serialized
+            assert client_state["runs"][0]["events"][-1]["message"] == "Payment tool rejected the request"
+            await stream1.aclose()
+            await stream2.aclose()
+    asyncio.run(scenario())
+
+
+def test_sandbox_reset_requires_confirmation_and_clears_only_local_demo_data(tmp_path):
+    from decimal import Decimal
+    settings = Settings(sqlite_path=str(tmp_path/"reset.sqlite3"), demo_mode=True)
+    app = create_app(settings, paypal=MockPayPal(), judge=RuleJudge())
+    with TestClient(app) as client:
+        identifier = client.post("/api/runs", json={"message":"Buy me a USB-C charger under $40"}).json()["id"]
+        poll(client, identifier)
+        assert app.state.audit.reserve_total("weekly") == Decimal("519.99")
+        assert client.get("/api/wallet").json()["balance"] == "9480.01"
+        assert client.patch("/api/policies", json={"daily_limit":"2500"}).status_code == 200
+        before_policy = client.get("/api/policies").json()
+        app.state.llm_budget.reserve()
+        before_model_budget = app.state.llm_budget.snapshot()
+        before_rate_limit = {key:list(value) for key,value in app.state.rate_limiter.clients.items()}
+        app.state.firewall._reviews["finished-run"] = "cached review"
+        before_rows = client.get("/api/audit").json()["rows"]
+        for body in [{}, {"confirmed":False}, {"confirmed":1}, {"confirmed":"true"}, {"confirmed":True, "extra":True}]:
+            assert client.post("/api/sandbox/reset", json=body).status_code == 422
+            assert client.get("/api/audit").json()["rows"] == before_rows
+        response = client.post("/api/sandbox/reset", json={"confirmed":True})
+        assert response.status_code == 200
+        assert "not reversed" in response.json()["message"]
+        assert response.json()["wallet"]["balance"] == "10000.00"
+        assert client.get("/api/audit").json() == {"rows":[],"stats":{"blocked_amount":0,"allowed_amount":0}}
+        assert client.get(f"/api/runs/{identifier}").status_code == 404
+        assert app.state.audit.reserve_total("weekly") == 0
+        assert app.state.runs == {} and app.state.firewall._reviews == {}
+        assert client.get("/api/policies").json() == before_policy
+        assert client.get("/api/mode").json()["mode"] == "Monitor"
+        assert app.state.llm_budget.snapshot() == before_model_budget
+        assert {key:list(value) for key,value in app.state.rate_limiter.clients.items()} == before_rate_limit
+        # Reset is idempotent and does not recreate an audit row.
+        assert client.post("/api/sandbox/reset", json={"confirmed":True}).status_code == 200
+        assert client.get("/api/audit").json()["rows"] == []
+
+
+def test_sandbox_reset_rejects_running_and_pending_approval_runs(tmp_path):
+    import asyncio
+    import threading
+    class WaitingPayPal(MockPayPal):
+        submitted = threading.Event()
+        async def execute(self, call, request_id):
+            self.submitted.set()
+            await asyncio.Event().wait()
+    paypal = WaitingPayPal()
+    app = create_app(Settings(sqlite_path=str(tmp_path/"reset-active.sqlite3"), demo_mode=True), paypal=paypal, judge=RuleJudge())
+    with TestClient(app) as client:
+        identifier = client.post("/api/runs", json={"message":"Buy me a USB-C charger under $40"}).json()["id"]
+        assert paypal.submitted.wait(3)
+        assert client.post("/api/sandbox/reset", json={"confirmed":True}).status_code == 409
+        assert client.get("/api/audit").json()["rows"]
+        client.post(f"/api/runs/{identifier}/cancel")
+        client.patch("/api/mode", json={"mode":"Enforce"})
+        identifier = client.post("/api/runs", json={"message":"Pay my contractor's $120 invoice"}).json()["id"]
+        run = poll(client, identifier, "awaiting_approval")
+        assert client.post("/api/sandbox/reset", json={"confirmed":True}).status_code == 409
+        assert client.post(f"/api/approvals/{run['approvals'][0]['id']}", json={"approved":False}).status_code == 200
+        poll(client, identifier)
+        assert client.post("/api/sandbox/reset", json={"confirmed":True}).status_code == 200
+        assert client.post(f"/api/approvals/{run['approvals'][0]['id']}", json={"approved":True}).status_code == 409
+
+
+def test_sandbox_reset_sse_updates_console_and_client_snapshots(tmp_path):
+    import asyncio
+    import json
+    from airlock.app import ResetSandboxData
+    from airlock.store import Run
+    from firewall import Decision, Provenance, ToolCall, Verdict
+    class Connected:
+        async def is_disconnected(self):
+            return False
+    async def scenario():
+        app = create_app(Settings(sqlite_path=str(tmp_path/"reset-sse.sqlite3")), paypal=MockPayPal(), judge=RuleJudge())
+        async with app.router.lifespan_context(app):
+            run = Run("Buy me a USB-C charger under $40", False)
+            run.status = "completed"
+            app.state.runs[run.id] = run
+            app.state.audit.insert(ToolCall(tool="create_order", amount="19.99", payee="shop@chargers.example"), Verdict(decision=Decision.ALLOW, reason="Requested purchase", mode="Monitor"), run.id, False, True, Provenance(run.message).serialize(), "succeeded")
+            console = app.state.event_stream(Connected(), "console")
+            client = app.state.event_stream(Connected(), "client")
+            parse = lambda event:json.loads(event.split("data: ",1)[1].strip())
+            for stream in [console, client]:
+                initial = parse(await anext(stream))
+                assert initial["runs"] and initial["wallet"]["balance"] == "9980.01"
+            reset = next(route.endpoint for route in app.routes if getattr(route,"path",None) == "/api/sandbox/reset")
+            await reset(ResetSandboxData(confirmed=True))
+            for stream in [console, client]:
+                snapshot = parse(await anext(stream))
+                assert snapshot["runs"] == [] and snapshot["audit"]["rows"] == []
+                assert snapshot["wallet"]["balance"] == "10000.00"
+                await stream.aclose()
+    asyncio.run(scenario())
+
+
+def test_sandbox_reset_rejects_unfinished_task_even_with_terminal_run_status(tmp_path):
+    import asyncio
+    import threading
+    app = create_app(Settings(sqlite_path=str(tmp_path/"reset-task.sqlite3")), paypal=MockPayPal(), judge=RuleJudge())
+    started = threading.Event()
+    async def unfinished(run):
+        run.status = "completed"
+        started.set()
+        await asyncio.Event().wait()
+    app.state.agent.run = unfinished
+    with TestClient(app) as client:
+        client.post("/api/runs", json={"message":"hello"})
+        assert started.wait(3)
+        assert client.post("/api/sandbox/reset", json={"confirmed":True}).status_code == 409
+        assert app.state.runs

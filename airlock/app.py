@@ -1,16 +1,20 @@
 import asyncio
+import json
+import os
+from decimal import Decimal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 import yaml
 from firewall import AuditStore, Firewall, Policy, RuleJudge, build_judge
 from firewall.limits import DailyLLMBudget
 from .limits import RunRateLimiter, client_ip
 from .agent import DemoAgent
+from .catalog import Channel3Catalog
 from .config import Settings
 from .paypal import build_paypal
 from .store import ApprovalManager, Run
@@ -19,8 +23,25 @@ from .store import ApprovalManager, Run
 class StartRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
     message: str = Field(min_length=1,max_length=4000)
-    firewall_enabled: bool = True
+    firewall_enabled: bool | None = None
     agent_mode: Literal["live", "compromised"] | None = None
+
+
+class ModeChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["Monitor", "Enforce"]
+
+
+class ResetSandboxData(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    confirmed: bool
+
+    @field_validator("confirmed")
+    @classmethod
+    def require_confirmation(cls, value):
+        if value is not True:
+            raise ValueError("Reset requires confirmed: true")
+        return value
 
 
 class ApprovalChoice(BaseModel):
@@ -28,7 +49,7 @@ class ApprovalChoice(BaseModel):
     approved: bool
 
 
-def create_app(settings=None, *, paypal=None, judge=None):
+def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
     settings = settings or Settings.from_env()
     policy = Policy.load(settings.policy_path)
     policy.allowed_payees = [settings.shop_email if x == "shop@chargers.example" else settings.contractor_email if x == "contractor@contractor.example" else x for x in policy.allowed_payees]
@@ -44,7 +65,9 @@ def create_app(settings=None, *, paypal=None, judge=None):
         judge.trusted_contacts = {"shop":settings.shop_email,"my contractor":settings.contractor_email}
     firewall = Firewall(policy,judge,audit)
     approvals = ApprovalManager()
-    agent = DemoAgent(settings,firewall,paypal,approvals,budget=budget)
+    mode = settings.initial_mode
+    catalog = catalog or Channel3Catalog(settings.channel3_api_key)
+    agent = DemoAgent(settings,firewall,paypal,approvals,budget=budget,catalog=catalog,mode_getter=lambda:mode)
     runs, tasks, run_tasks = {}, set(), {}
 
     @asynccontextmanager
@@ -54,11 +77,13 @@ def create_app(settings=None, *, paypal=None, judge=None):
             task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
         await paypal.close()
+        await catalog.close()
         audit.close()
 
-    app = FastAPI(title="Airlock",version="0.1.0",lifespan=lifespan)
+    app = FastAPI(title="Airlock",version="0.2.0",lifespan=lifespan,docs_url=None,redoc_url=None)
     app.state.llm_budget, app.state.rate_limiter = budget, rate_limiter
     app.state.audit, app.state.runs, app.state.agent = audit,runs,agent
+    app.state.firewall = firewall
 
     @app.get("/api/health")
     async def health():
@@ -74,11 +99,102 @@ def create_app(settings=None, *, paypal=None, judge=None):
     @app.get("/api/config")
     async def config():
         modes = runtime_modes()
-        return {"demo_mode": modes["agent_mode"] == "compromised", "paypal_mode": paypal.mode,
+        return {"mode":mode, "version":"0.2.0", "deployed_on_render":os.getenv("RENDER", "").lower() == "true",
+                "demo_mode": modes["agent_mode"] == "compromised", "paypal_mode": paypal.mode,
                 "agent_provider": settings.agent_provider, "agent_model": settings.agent_model,
                 "policy_yaml": yaml.safe_dump(policy.model_dump(mode="json"), sort_keys=False),
                 "shop_email": settings.shop_email, "contractor_email": settings.contractor_email,
                 **modes}
+
+    def mode_state():
+        return mode
+
+    def set_mode(value):
+        nonlocal mode
+        mode = value
+
+    @app.get("/api/mode")
+    async def get_mode():
+        return {"mode":mode}
+
+    @app.patch("/api/mode")
+    async def update_mode(body: ModeChoice):
+        old = mode
+        set_mode(body.mode)
+        if old != mode:
+            audit.record_config_change("mode", old, mode)
+        return {"mode":mode}
+
+    @app.get("/api/policies")
+    async def get_policies():
+        return firewall.policy.model_dump(mode="json")
+
+    @app.patch("/api/policies")
+    async def update_policies(body: dict):
+        nonlocal policy
+        before = firewall.policy.model_dump(mode="json")
+        try:
+            updated = Policy.model_validate({**before, **body})
+        except ValidationError:
+            raise HTTPException(422, "Invalid policy configuration") from None
+        policy = firewall.policy = updated
+        after = updated.model_dump(mode="json")
+        audit.record_config_change("policy", before, after)
+        return after
+
+    def wallet_snapshot():
+        # Ledger movement reflects accepted calls/created orders, not settlement.
+        rows = audit.report()["rows"]
+        amount = sum((Decimal(str(row["amount"])) for row in rows if row["status"] == "succeeded" and row["tool"] in {"create_order", "create_payout"}), Decimal(0))
+        return {"balance":f"{settings.sandbox_starting_balance-amount:.2f}", "currency":"USD", "label":"Sandbox · local balance", "source":"local_ledger", "starting_balance":f"{settings.sandbox_starting_balance:.2f}", "paypal_mode":paypal.mode}
+
+    @app.post("/api/sandbox/reset")
+    async def reset_sandbox_data(body: ResetSandboxData):
+        if any(run.status in {"running", "awaiting_approval"} for run in runs.values()) or any(not task.done() for task in tasks) or approvals.pending:
+            raise HTTPException(409, "Finish or stop the current run before resetting sandbox data")
+        # No await in the check/reset section: a new run cannot interleave.
+        audit.reset_sandbox_data()
+        runs.clear()
+        run_tasks.clear()
+        approvals.pending.clear()
+        firewall._reviews.clear()
+        return {"status":"reset", "message":"Local sandbox data reset. PayPal sandbox orders and payouts are not reversed.", "wallet":wallet_snapshot()}
+
+    @app.get("/api/wallet")
+    async def get_wallet():
+        return wallet_snapshot()
+
+    async def state_snapshot(audience="console"):
+        full_config = await config()
+        if audience == "client":
+            full_config = {key:value for key,value in full_config.items() if key in {"paypal_mode", "demo_mode", "llm_degraded", "version"}}
+        return {"config":full_config,
+                "runs":[run.client_snapshot() if audience == "client" else run.snapshot() for run in runs.values()],
+                "audit":{"rows":[],"stats":{"blocked_amount":0,"allowed_amount":0}} if audience == "client" else audit.report(),
+                "wallet":wallet_snapshot()}
+
+    async def event_stream(request, audience="console"):
+        previous = None
+        idle = 0
+        while not await request.is_disconnected():
+            current = json.dumps(await state_snapshot(audience), separators=(",", ":"), ensure_ascii=False)
+            if current != previous:
+                yield "event: state\ndata: " + current + "\n\n"
+                previous = current
+                idle = 0
+            else:
+                idle += 1
+                if idle >= 150:
+                    yield ": heartbeat\n\n"
+                    idle = 0
+            await asyncio.sleep(.1)
+
+    app.state.event_stream = event_stream
+    app.state.snapshot = state_snapshot
+
+    @app.get("/api/events")
+    async def events(request: Request, audience: Literal["client", "console"] = "console"):
+        return StreamingResponse(event_stream(request, audience), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
 
     @app.post("/api/runs",status_code=202)
     async def start(body: StartRun, request: Request):
@@ -90,7 +206,14 @@ def create_app(settings=None, *, paypal=None, judge=None):
         if any(run.status in {"running","awaiting_approval"} for run in runs.values()):
             raise HTTPException(409,"Finish the current demo run before starting another")
         requested = body.agent_mode or ("compromised" if settings.demo_mode else settings.agent_mode)
-        run = Run(body.message,body.firewall_enabled,agent_mode=requested)
+        if body.firewall_enabled is not None:
+            # Legacy API compatibility: a requested mode changes the shared console state.
+            previous_mode = mode_state()
+            next_mode = "Enforce" if body.firewall_enabled else "Monitor"
+            set_mode(next_mode)
+            if previous_mode != next_mode:
+                audit.record_config_change("mode", previous_mode, next_mode)
+        run = Run(body.message,mode_state() == "Enforce",agent_mode=requested)
         runs[run.id] = run
         task = asyncio.create_task(agent.run(run))
         tasks.add(task)
@@ -145,6 +268,12 @@ def create_app(settings=None, *, paypal=None, judge=None):
         app.mount("/assets",StaticFiles(directory=dist/"assets"),name="assets")
 
     @app.get("/")
+    async def root():
+        return RedirectResponse("/console", status_code=307)
+
+    @app.get("/client")
+    @app.get("/console")
+    @app.get("/docs")
     async def index():
         if not (dist/"index.html").is_file():
             raise HTTPException(503,"Frontend not built. Run npm ci && npm run build in frontend/.")

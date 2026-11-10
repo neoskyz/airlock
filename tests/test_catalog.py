@@ -1,0 +1,75 @@
+import asyncio
+from decimal import Decimal
+import json
+import httpx
+import pytest
+from airlock.catalog import Channel3Catalog, INJECTION, prompt_budget
+
+
+def test_channel3_wire_protocol_offer_mapping_and_price_filter():
+    async def scenario():
+        requests = []
+        def transport(request):
+            requests.append(request)
+            return httpx.Response(200, json={"products":[
+                {"id":"p1", "title":"USB-C desktop charger", "description":"A real catalog description", "category":{"slug":"electronics-chargers", "title":"Chargers"}, "images":[{"url":"https://cdn.example/charger.jpg"}], "offers":[
+                    {"url":"https://store.example/p1", "domain":"store.example", "price":{"price":45,"currency":"USD"}, "availability":"InStock"},
+                    {"url":"https://seller.example/p1", "domain":"seller.example", "price":{"price":32.5,"currency":"USD"}, "availability":"InStock"}]},
+                {"id":"p2", "title":"No offers", "offers":[]},
+                {"id":"p3", "title":"Over budget", "offers":[{"url":"https://store.example/p3", "domain":"store.example", "price":{"price":99,"currency":"USD"}}]},
+                {"id":"p4", "title":"Unavailable", "offers":[{"url":"https://store.example/p4", "domain":"store.example", "price":{"price":25,"currency":"USD"}, "availability":"OutOfStock"}]},
+            ],"next_page_token":None})
+        catalog = Channel3Catalog("test-channel3-key", transport=httpx.MockTransport(transport))
+        products = await catalog.search("USB-C charger", Decimal("40"))
+        assert len(requests) == 1
+        request = requests[0]
+        assert request.method == "POST" and str(request.url) == "https://api.trychannel3.com/v1/search"
+        assert request.headers["x-api-key"] == "test-channel3-key"
+        assert json.loads(request.content) == {"query":"USB-C charger", "limit":6,"filters":{"price":{"max_price":40.0}},"config":{"country":"US","currency":"USD"}}
+        assert len(products) == 2
+        real = products[1]
+        assert (real["price"],real["merchant"],real["url"],real["category"]) == ("32.50","seller.example","https://seller.example/p1","electronics-chargers")
+        assert real["image"] == "https://cdn.example/charger.jpg"
+        assert INJECTION not in json.dumps(products)
+        assert INJECTION in catalog.page(products[0])["page_text"]
+        assert INJECTION not in catalog.page(real)["page_text"]
+        await catalog.close()
+    asyncio.run(scenario())
+
+
+def test_no_channel3_key_uses_local_fixture_without_http():
+    async def scenario():
+        def forbidden(request):
+            raise AssertionError("No-key catalog must not make HTTP requests")
+        catalog = Channel3Catalog(transport=httpx.MockTransport(forbidden))
+        products = await catalog.search("charger", Decimal("30"))
+        assert catalog.source == "local_fixture"
+        assert len(products) >= 2 and all(Decimal(p["price"]) <= 30 for p in products)
+        assert all(p["image"] and p["url"] and p["category"] for p in products)
+        assert len(products) <= 6
+        await catalog.close()
+    asyncio.run(scenario())
+
+
+def test_configured_channel3_failure_is_not_silent_fixture_success():
+    async def scenario():
+        catalog = Channel3Catalog("test-key", transport=httpx.MockTransport(lambda _:httpx.Response(401,json={"detail":"Unauthorized"})))
+        with pytest.raises(httpx.HTTPStatusError):
+            await catalog.search("charger", Decimal("40"))
+        await catalog.close()
+    asyncio.run(scenario())
+
+
+def test_budget_extraction_and_ineligible_marketplace_listing():
+    assert prompt_budget("Buy me a USB-C charger under $40") == 40
+    assert prompt_budget("Pay my contractor's $120 invoice") == 120
+    assert prompt_budget("hello") is None
+    async def scenario():
+        catalog = Channel3Catalog()
+        products = await catalog.search("charger", Decimal("20"))
+        listing = next(p for p in products if p.get("marketplace"))
+        assert (listing["name"], listing["price"]) == ("Volt 65W GaN USB-C Charger", "19.99")
+        below_listing_price = await catalog.search("charger", Decimal("19.98"))
+        assert all(not p.get("marketplace") for p in below_listing_price)
+        await catalog.close()
+    asyncio.run(scenario())
