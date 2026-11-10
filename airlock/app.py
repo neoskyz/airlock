@@ -1,13 +1,14 @@
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 import yaml
 from firewall import AuditStore, Firewall, Policy, RuleJudge, build_judge
-from .agent import AGENT_MODEL, DemoAgent
+from .agent import DemoAgent
 from .config import Settings
 from .paypal import build_paypal
 from .store import ApprovalManager, Run
@@ -17,6 +18,7 @@ class StartRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
     message: str = Field(min_length=1,max_length=4000)
     firewall_enabled: bool = True
+    agent_mode: Literal["live", "compromised"] | None = None
 
 
 class ApprovalChoice(BaseModel):
@@ -30,7 +32,7 @@ def create_app(settings=None, *, paypal=None, judge=None):
     policy.allowed_payees = [settings.shop_email if x == "shop@chargers.example" else settings.contractor_email if x == "contractor@contractor.example" else x for x in policy.allowed_payees]
     audit = AuditStore(settings.sqlite_path)
     paypal = paypal or build_paypal(settings.paypal_client_id,settings.paypal_client_secret)
-    judge = judge or build_judge(settings.anthropic_api_key)
+    judge = judge or build_judge(settings.anthropic_api_key, model=settings.judge_model)
     if isinstance(judge, RuleJudge):
         judge.shop_payee, judge.contractor_payee = settings.shop_email,settings.contractor_email
     if hasattr(judge,"trusted_contacts"):
@@ -58,7 +60,7 @@ def create_app(settings=None, *, paypal=None, judge=None):
 
     @app.get("/api/config")
     async def config():
-        return {"demo_mode":settings.scripted,"paypal_mode":paypal.mode,"agent_model":AGENT_MODEL,"judge_model":"claude-haiku-5-5" if judge.mode == "anthropic" else "rules (no API key)","policy_yaml":yaml.safe_dump(policy.model_dump(mode="json"),sort_keys=False),"judge_mode":judge.mode,"shop_email":settings.shop_email,"contractor_email":settings.contractor_email}
+        return {"demo_mode":settings.scripted,"agent_mode":settings.resolve_agent_mode(),"live_available":bool(settings.anthropic_api_key),"paypal_mode":paypal.mode,"agent_model":settings.agent_model,"judge_model":getattr(judge,"model",settings.judge_model) if judge.mode == "anthropic" else "rules (no API key)","policy_yaml":yaml.safe_dump(policy.model_dump(mode="json"),sort_keys=False),"judge_mode":judge.mode,"shop_email":settings.shop_email,"contractor_email":settings.contractor_email}
 
     @app.post("/api/runs",status_code=202)
     async def start(body: StartRun):
@@ -66,7 +68,9 @@ def create_app(settings=None, *, paypal=None, judge=None):
             raise HTTPException(422,"Message cannot be blank")
         if any(run.status in {"running","awaiting_approval"} for run in runs.values()):
             raise HTTPException(409,"Finish the current demo run before starting another")
-        run = Run(body.message,body.firewall_enabled)
+        run = Run(body.message,body.firewall_enabled,agent_mode=settings.resolve_agent_mode(body.agent_mode))
+        if body.agent_mode == "live" and run.agent_mode != "live":
+            await run.say("Live Claude agent unavailable without ANTHROPIC_API_KEY; using Simulated compromised agent.")
         runs[run.id] = run
         task = asyncio.create_task(agent.run(run))
         tasks.add(task)

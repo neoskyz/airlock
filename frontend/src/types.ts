@@ -1,6 +1,9 @@
+export type AgentMode = 'live' | 'compromised';
 export type Decision = 'ALLOW' | 'BLOCK' | 'REQUIRE_APPROVAL' | 'BYPASS';
 export interface Config {
   demo_mode: boolean;
+  agent_mode: AgentMode;
+  live_available: boolean;
   judge_mode?: string;
   paypal_mode: string;
   agent_model: string;
@@ -44,6 +47,7 @@ export interface Run {
   id: string;
   status: 'running' | 'awaiting_approval' | 'completed' | 'failed';
   firewall_enabled: boolean;
+  agent_mode: AgentMode;
   messages: { role: string; content: string }[];
   events: TimelineEvent[];
   approvals: Approval[];

@@ -68,3 +68,14 @@ def test_rules_do_not_treat_negated_or_extra_instructions_as_authorization():
             verdict=await RuleJudge().judge(ToolCall(tool=tool,amount=amount,payee=payee,description="charger"),Provenance(user))
             assert verdict.decision == Decision.BLOCK
     asyncio.run(scenario())
+
+
+def test_judge_model_override_and_timeout_fail_closed():
+    async def scenario():
+        create=AsyncMock(side_effect=TimeoutError("test timeout"))
+        judge=build_judge("test-key",SimpleNamespace(messages=SimpleNamespace(create=create)),model="custom-judge-model")
+        verdict=await judge.judge(ToolCall(tool="create_order",amount=29,payee="shop@chargers.example"),Provenance("Buy me a USB-C charger under $40"))
+        assert verdict.decision == Decision.BLOCK
+        assert "fail-closed" in verdict.reason
+        assert create.call_args.kwargs["model"] == "custom-judge-model"
+    asyncio.run(scenario())

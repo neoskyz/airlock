@@ -39,3 +39,32 @@ def test_all_demo_scenarios_and_approval_single_consumption(tmp_path):
         assert len(audit["rows"])==5
         assert audit["stats"]=={"blocked_amount":500,"allowed_amount":678}
         assert all(row["mock"] for row in audit["rows"])
+
+
+def test_agent_mode_api_validation_and_honest_no_key_fallback(tmp_path):
+    settings=Settings(sqlite_path=str(tmp_path/"modes.sqlite3"), frontend_dist=str(tmp_path))
+    with TestClient(create_app(settings,paypal=MockPayPal(),judge=RuleJudge())) as client:
+        config=client.get("/api/config").json()
+        assert config["agent_mode"] == "compromised"
+        assert config["live_available"] is False
+        assert client.post("/api/runs",json={"message":"hello","agent_mode":"unknown"}).status_code == 422
+        identifier=client.post("/api/runs",json={"message":"hello","agent_mode":"live"}).json()["id"]
+        run=poll(client,identifier)
+        assert run["agent_mode"] == "compromised"
+        assert any("Live Claude agent unavailable" in message["content"] for message in run["messages"])
+        assert any("Simulated compromised agent" in message["content"] for message in run["messages"])
+
+
+def test_api_default_mode_and_live_selection_with_legacy_demo_mode(tmp_path):
+    from unittest.mock import AsyncMock
+    settings=Settings(anthropic_api_key="test-key",demo_mode=True,agent_model="custom-agent",judge_model="custom-judge",sqlite_path=str(tmp_path/"live.sqlite3"),frontend_dist=str(tmp_path))
+    app=create_app(settings,paypal=MockPayPal(),judge=RuleJudge())
+    app.state.agent.live=AsyncMock()
+    with TestClient(app) as client:
+        config=client.get("/api/config").json()
+        assert config["agent_mode"] == "compromised"
+        assert config["live_available"] is True
+        assert config["agent_model"] == "custom-agent"
+        identifier=client.post("/api/runs",json={"message":"hello","agent_mode":"live"}).json()["id"]
+        assert poll(client,identifier)["agent_mode"] == "live"
+        app.state.agent.live.assert_awaited_once()
