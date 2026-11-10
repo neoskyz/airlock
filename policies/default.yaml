@@ -1,0 +1,12 @@
+# Only sandbox / MOCK money; amounts are USD.
+currency: USD
+single_transaction_limit: 1000
+daily_limit: 10000
+auto_approve_threshold: 100
+# Unknown recipients require approval; intent judge may still BLOCK.
+allowed_payees:
+  - shop@chargers.example
+  - contractor@contractor.example
+unknown_payee_action: REQUIRE_APPROVAL
+forbidden_tools:
+  - refund_payment

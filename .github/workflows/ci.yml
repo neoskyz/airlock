@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.13'
+          enable-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install backend
+        run: uv sync
+      - name: Run isolated backend tests
+        env:
+          ANTHROPIC_API_KEY: ''
+          PAYPAL_CLIENT_ID: ''
+          PAYPAL_CLIENT_SECRET: ''
+          DEMO_MODE: 'true'
+        run: uv run --no-sync pytest
+      - name: Build frontend
+        run: |
+          if [ ! -f frontend/package-lock.json ]; then
+            npm install --package-lock-only --ignore-scripts --prefix frontend
+          fi
+          npm ci --prefix frontend
+          npm run build --prefix frontend

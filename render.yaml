@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: airlock
+    runtime: python
+    plan: free
+    buildCommand: >-
+      bash scripts/frontend-build.sh &&
+      python -m pip install uv &&
+      uv sync --no-dev
+    startCommand: uv run --no-sync uvicorn airlock.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.12
+      - key: NODE_VERSION
+        value: 22.21.1
+      - key: DEMO_MODE
+        value: 'true'
+      - key: SQLITE_PATH
+        value: data/audit.sqlite3
+      - key: POLICY_PATH
+        value: policies/default.yaml
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_SHOP_EMAIL
+        value: shop@chargers.example
+      - key: PAYPAL_CONTRACTOR_EMAIL
+        value: contractor@contractor.example
