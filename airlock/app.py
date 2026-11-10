@@ -121,9 +121,9 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
     @app.patch("/api/mode")
     async def update_mode(body: ModeChoice):
         old = mode
-        set_mode(body.mode)
-        if old != mode:
-            audit.record_config_change("mode", old, mode)
+        if old != body.mode:
+            audit.record_config_change("mode", old, body.mode)
+            set_mode(body.mode)
         return {"mode":mode}
 
     @app.get("/api/policies")
@@ -135,12 +135,17 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
         nonlocal policy
         before = firewall.policy.model_dump(mode="json")
         try:
-            updated = Policy.model_validate({**before, **body})
+            changes = dict(body)
+            if isinstance(changes.get("enabled"), dict):
+                changes["enabled"] = {**before["enabled"], **changes["enabled"]}
+            updated = Policy.model_validate({**before, **changes})
+            if updated.currency != "USD":
+                raise HTTPException(422, "The sandbox wallet supports USD policies only")
         except ValidationError:
             raise HTTPException(422, "Invalid policy configuration") from None
-        policy = firewall.policy = updated
         after = updated.model_dump(mode="json")
         audit.record_config_change("policy", before, after)
+        policy = firewall.policy = updated
         return after
 
     def wallet_snapshot():
@@ -212,9 +217,9 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
             # Legacy API compatibility: a requested mode changes the shared console state.
             previous_mode = mode_state()
             next_mode = "Enforce" if body.firewall_enabled else "Monitor"
-            set_mode(next_mode)
             if previous_mode != next_mode:
                 audit.record_config_change("mode", previous_mode, next_mode)
+                set_mode(next_mode)
         run = Run(body.message,mode_state() == "Enforce",agent_mode=requested)
         runs[run.id] = run
         task = asyncio.create_task(agent.run(run))

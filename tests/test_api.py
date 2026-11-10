@@ -22,21 +22,33 @@ def test_all_demo_scenarios_and_approval_single_consumption(tmp_path):
         assert client.get("/api/health").status_code==200
         assert client.get("/api/config").json()["paypal_mode"]=="MOCK"
         assert client.get("/api/missing").status_code==404
-        disabled=client.post("/api/runs",json={"message":"Buy me a USB-C charger under $40","firewall_enabled":False}).json()["id"]
+        disabled=client.post("/api/runs",json={"message":"Buy me the cheapest 65W USB-C charger under $40","firewall_enabled":False}).json()["id"]
         off=poll(client,disabled)
         assert len([e for e in off["events"] if e["type"]=="tool_result" and e["status"]=="succeeded"])==2
-        enabled=client.post("/api/runs",json={"message":"Buy me a USB-C charger under $40","firewall_enabled":True}).json()["id"]
+        enabled=client.post("/api/runs",json={"message":"Buy me the cheapest 65W USB-C charger under $40","firewall_enabled":True}).json()["id"]
         on=poll(client,enabled)
         assert any(e.get("decision")=="BLOCK" and e.get("suspicious_excerpt") for e in on["events"])
         headphones=client.post("/api/runs",json={"message":"Buy me noise-cancelling headphones under $300","firewall_enabled":True}).json()["id"]
         pending=poll(client,headphones,"awaiting_approval")
+        assert 60 <= pending["approvals"][0]["risk_score"] <= 84
         identifier=pending["approvals"][0]["id"]
         assert client.post(f"/api/approvals/{identifier}",json={"approved":True}).status_code==200
         assert client.post(f"/api/approvals/{identifier}",json={"approved":True}).status_code==409
         final=poll(client,headphones)
         assert final["approvals"][0]["status"]=="approved"
         audit=client.get("/api/audit").json()
-        assert len([r for r in audit["rows"] if r["tool"] in {"create_order", "create_payout"}])==5
+        payments = [r for r in audit["rows"] if r["tool"] in {"create_order", "create_payout"}]
+        assert len(payments) == 5
+        for run_id, expected_status in [(disabled, "succeeded"), (enabled, "blocked")]:
+            order = next(row for row in payments if row["run_id"] == run_id and row["tool"] == "create_order")
+            payout = next(row for row in payments if row["run_id"] == run_id and row["tool"] == "create_payout")
+            assert order["amount"] == 19.99 and order["computed_decision"] == "ALLOW"
+            assert order["call"]["merchant"] == "marketplace.volt.example"
+            assert order["status"] == "succeeded"
+            assert payout["amount"] == 500 and payout["computed_decision"] == "BLOCK"
+            assert payout["status"] == expected_status
+            assert payout["display_decision"] == ("Would have blocked" if run_id == disabled else "Blocked")
+        assert len([row for row in payments if row["run_id"] == headphones]) == 1
         assert audit["stats"]=={"blocked_amount":500,"allowed_amount":789.97}
         assert all(row["mock"] for row in audit["rows"] if row["tool"] in {"create_order", "create_payout"})
 
@@ -414,3 +426,36 @@ def test_channel3_offer_order_waits_for_approval_then_creates_sandbox_order(tmp_
         assert client.post(f"/api/approvals/{identifier}", json={"approved":True}).status_code == 409
         storefront = client.get("/api/store/volt-65w").json()
         assert storefront["url"] == "/store/volt-65w" and INJECTION in storefront["page_text"]
+
+
+def test_partial_policy_toggles_preserve_other_controls_and_currency_invariant(tmp_path):
+    app = create_app(Settings(sqlite_path=str(tmp_path/"partial-policy.sqlite3")), paypal=MockPayPal(), judge=RuleJudge())
+    with TestClient(app) as client:
+        first = client.patch("/api/policies", json={"enabled":{"allowlist":False}})
+        assert first.status_code == 200
+        second = client.patch("/api/policies", json={"enabled":{"categories":False}})
+        assert second.status_code == 200
+        enabled = second.json()["enabled"]
+        assert enabled["allowlist"] is False and enabled["categories"] is False
+        assert enabled["single_transaction"] is True
+        assert client.patch("/api/policies", json={"currency":"EUR"}).status_code == 422
+        assert client.patch("/api/policies", json={"daily_limit":"1e100"}).status_code == 422
+        assert client.get("/api/policies").json()["currency"] == "USD"
+        assert client.get("/api/policies").json()["daily_limit"] == "2000"
+
+
+def test_configuration_does_not_change_when_audit_write_fails(tmp_path):
+    import sqlite3
+    from unittest.mock import Mock
+
+    app = create_app(Settings(initial_mode="Enforce", sqlite_path=str(tmp_path/"audit-failure.sqlite3")), paypal=MockPayPal(), judge=RuleJudge())
+    with TestClient(app, raise_server_exceptions=False) as client:
+        original_policy = client.get("/api/policies").json()
+        app.state.audit.record_config_change = Mock(side_effect=sqlite3.OperationalError("Audit unavailable"))
+        assert client.patch("/api/mode", json={"mode":"Monitor"}).status_code == 500
+        assert client.get("/api/mode").json()["mode"] == "Enforce"
+        assert client.patch("/api/policies", json={"daily_limit":"100"}).status_code == 500
+        assert client.get("/api/policies").json() == original_policy
+        assert client.post("/api/runs", json={"message":"Buy me a USB-C charger under $40", "firewall_enabled":False}).status_code == 500
+        assert client.get("/api/mode").json()["mode"] == "Enforce"
+        assert not app.state.runs

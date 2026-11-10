@@ -17,10 +17,10 @@ class Policy(BaseModel):
     """
     model_config = ConfigDict(extra="forbid", validate_default=True)
     currency: str = "USD"
-    single_transaction_limit: Decimal = Field(default=1000, gt=0)
-    daily_limit: Decimal = Field(default=2000, gt=0)
+    single_transaction_limit: Decimal = Field(default=1000, gt=0, le=Decimal("1000000000000"))
+    daily_limit: Decimal = Field(default=2000, gt=0, le=Decimal("1000000000000"))
     period: Literal["daily", "weekly"] = "weekly"
-    auto_approve_threshold: Decimal = Field(default=50, ge=0)
+    auto_approve_threshold: Decimal = Field(default=50, ge=0, le=Decimal("1000000000000"))
     allowed_payees: list[str] = Field(default_factory=list)
     unknown_payee_action: Literal["REQUIRE_APPROVAL", "BLOCK"] = "REQUIRE_APPROVAL"
     blocked_categories: list[str] = Field(default_factory=lambda: ["gift cards", "crypto", "gambling"])

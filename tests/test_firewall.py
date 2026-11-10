@@ -102,3 +102,89 @@ def test_malformed_judge_result_is_fail_closed():
         assert result["decision"] == "BLOCK"
         executor.assert_not_called();store.close()
     asyncio.run(scenario())
+
+
+def test_observer_failure_does_not_change_provider_outcome_or_release_reservation():
+    async def scenario():
+        firewall, store = setup()
+        execute = AsyncMock(return_value={"id":"MOCK-ORDER", "status":"CREATED"})
+        observer = AsyncMock(side_effect=RuntimeError("Observer unavailable"))
+        result = await firewall.invoke(
+            ToolCall(tool="create_order", amount="19.99", payee="shop@chargers.example", category="electronics"),
+            Provenance("Buy me a USB-C charger under $40"), execute, emit=observer)
+        assert result["id"] == "MOCK-ORDER"
+        execute.assert_awaited_once()
+        event = store.report()["rows"][0]
+        assert event["status"] == "succeeded" and event["paypal_id"] == "MOCK-ORDER"
+        assert event["execution_result"]["id"] == "MOCK-ORDER"
+        assert store.reserve_total() == Decimal("19.99")
+        assert observer.await_count == 2
+        store.close()
+    asyncio.run(scenario())
+
+
+def test_cancellation_while_publishing_decision_releases_unsubmitted_payment():
+    async def scenario():
+        firewall, store = setup()
+        publishing = asyncio.Event()
+        async def observer(event):
+            publishing.set()
+            await asyncio.Future()
+        execute = AsyncMock()
+        task = asyncio.create_task(firewall.invoke(
+            ToolCall(tool="create_order", amount="19.99", payee="shop@chargers.example", category="electronics"),
+            Provenance("Buy me a USB-C charger under $40"), execute, emit=observer))
+        await publishing.wait()
+        assert store.reserve_total() == Decimal("19.99")
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        execute.assert_not_awaited()
+        event = store.report()["rows"][0]
+        assert event["status"] == "cancelled" and event["decision"] == "BLOCK"
+        assert event["computed_decision"] == "ALLOW"
+        assert store.reserve_total() == 0
+        store.close()
+    asyncio.run(scenario())
+
+
+def test_cancellation_after_known_provider_success_preserves_success():
+    async def scenario():
+        firewall, store = setup()
+        publishing = asyncio.Event()
+        async def observer(event):
+            if event["type"] == "tool_result":
+                publishing.set()
+                await asyncio.Future()
+        execute = AsyncMock(return_value={"id":"MOCK-ORDER", "status":"CREATED"})
+        task = asyncio.create_task(firewall.invoke(
+            ToolCall(tool="create_order", amount="19.99", payee="shop@chargers.example", category="electronics"),
+            Provenance("Buy me a USB-C charger under $40"), execute, emit=observer))
+        await publishing.wait()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        event = store.report()["rows"][0]
+        assert event["status"] == "succeeded" and event["paypal_id"] == "MOCK-ORDER"
+        assert store.report()["stats"]["allowed_amount"] == 19.99
+        store.close()
+    asyncio.run(scenario())
+
+
+def test_approval_callback_requires_explicit_boolean_true():
+    async def scenario():
+        firewall, store = setup()
+        execute = AsyncMock()
+        result = await firewall.invoke(
+            ToolCall(tool="create_order", amount="249.99", payee="shop@chargers.example", merchant="sony.com", category="electronics", description="Noise-cancelling headphones"),
+            Provenance("Buy me noise-cancelling headphones under $300"), execute,
+            request_approval=AsyncMock(return_value="false"))
+        assert result["status"] == "denied"
+        execute.assert_not_awaited()
+        assert store.reserve_total() == 0
+        store.close()
+    asyncio.run(scenario())

@@ -42,6 +42,8 @@ class DemoAgent:
             call = call.model_copy(update={"payee":self.settings.shop_email})
         if call.tool == "create_order" and getattr(run, "selected_product", None):
             product = run.selected_product
+            if call.amount != Decimal(product["price"]) or call.currency != product.get("currency", "USD"):
+                return {"error":"Order amount and currency must match the opened catalog product. No order was submitted."}
             # Catalog metadata is host-owned; model-provided categories never override it.
             call = call.model_copy(update={"category":product["category"], "product_id":product["id"], "merchant":product["merchant"]})
         if call.tool == "create_order":

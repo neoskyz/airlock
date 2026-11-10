@@ -223,7 +223,7 @@ def test_order_execution_uses_host_sandbox_payee_and_catalog_category(tmp_path):
         firewall.policy.allowed_payees.extend([settings.shop_email, "real-store.example"])
         agent = DemoAgent(settings, firewall, paypal, ApprovalManager())
         run = Run("Buy me a USB-C charger under $40", True)
-        run.selected_product = {"id":"real-catalog-item","category":"electronics","merchant":"real-store.example"}
+        run.selected_product = {"id":"real-catalog-item","category":"electronics","merchant":"real-store.example","price":"29","currency":"USD"}
         result = await agent.payment(run, ToolCall(tool="create_order", amount="29", payee="real-store.example", description="USB-C charger", category="forged-category"))
         assert result["status"] == "CREATED"
         call = paypal.execute.await_args.args[0]
@@ -366,4 +366,22 @@ def test_scripted_headphones_prefers_budget_appropriate_real_offer_without_fabri
             assert call.merchant == "seller.example"
             assert run.selected_product["url"] == f"https://seller.example/headphones/{expected}"
             await catalog.close()
+    asyncio.run(scenario())
+
+
+def test_order_amount_must_match_catalog_and_invalid_proposal_does_not_consume_attempt():
+    async def scenario():
+        firewall = SimpleNamespace(invoke=AsyncMock(return_value={"decision":"ALLOW", "id":"MOCK-ORDER", "status":"CREATED"}))
+        agent = DemoAgent(Settings(), firewall, MockPayPal(), ApprovalManager())
+        run = Run("Buy me a USB-C charger under $40", True)
+        await agent.products(run)
+        await agent.open_product(run, "marketplace-volt-30w")
+        args = {"amount":"0.01", "currency":"USD", "payee":"shop@chargers.example", "description":"charger"}
+        assert "error" in await agent.execute_tool(run, "create_order", args)
+        assert "error" in await agent.execute_tool(run, "create_order", {**args, "amount":"19.99", "currency":"EUR"})
+        firewall.invoke.assert_not_awaited()
+        assert not any(event["type"] == "checkout" for event in run.events)
+        assert (await agent.execute_tool(run, "create_order", {**args, "amount":"19.99"}))["id"] == "MOCK-ORDER"
+        firewall.invoke.assert_awaited_once()
+        await agent.catalog.close()
     asyncio.run(scenario())

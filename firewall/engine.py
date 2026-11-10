@@ -2,6 +2,7 @@ import asyncio
 from collections import OrderedDict
 from datetime import datetime, timezone
 import json
+import logging
 from time import perf_counter
 from .models import Decision, Latency, RiskFactor, Verdict, decision_label
 from .judge import normalize_review_evidence
@@ -62,7 +63,12 @@ class Firewall:
 
         async def send(**event):
             if emit:
-                await emit(event)
+                try:
+                    await emit(event)
+                except Exception as exc:
+                    # Observers cannot change payment execution or its audit
+                    # outcome. Never include callback text or secrets in logs.
+                    logging.getLogger(__name__).warning("Payment event observer failed: %s", type(exc).__name__)
 
         score, factors, tainted, excerpt, source = score_call(call, provenance, policy,
             known_payee=self.audit.has_payee(call.payee), recent_calls=self.audit.recent_count())
@@ -153,8 +159,16 @@ class Firewall:
                    "enforced_decision":verdict.decision.value if enforce else "ALLOW",
                    "display_decision":decision_label(verdict.decision, mode), "mode":mode}
         details = {"tool":call.tool,"amount":float(call.amount),"payee":call.payee,"mock":mock}
-        await send(type="decision",id=audit_id,message=verdict.reason,**verdict.model_dump(mode="json"),status=status,
-            computed_decision=outcome["computed_decision"],enforced_decision=outcome["enforced_decision"],display_decision=outcome["display_decision"],**details)
+        try:
+            await send(type="decision",id=audit_id,message=verdict.reason,**verdict.model_dump(mode="json"),status=status,
+                computed_decision=outcome["computed_decision"],enforced_decision=outcome["enforced_decision"],display_decision=outcome["display_decision"],**details)
+        except asyncio.CancelledError:
+            # The provider has not been called. Release its reservation even
+            # when cancellation arrives while publishing the first decision.
+            if status != "blocked":
+                self.audit.update(audit_id, status="cancelled", decision="BLOCK", reason="Payment cancelled before provider execution")
+            self.audit.update_metadata(audit_id, latency={**verdict.latency.model_dump(), "end_to_end_ms":round((perf_counter()-started)*1000,2)})
+            raise
         if enforce and verdict.decision == Decision.BLOCK:
             self.audit.update_metadata(audit_id, latency={**verdict.latency.model_dump(), "end_to_end_ms":round((perf_counter()-started)*1000,2)})
             return {"decision":"BLOCK","status":"blocked","reason":verdict.reason,**outcome}
@@ -162,7 +176,7 @@ class Firewall:
             approval_started = perf_counter()
             self.audit.record_approval(audit_id, "requested")
             try:
-                approved = bool(await request_approval(audit_id,call,verdict)) if request_approval else False
+                approved = (await request_approval(audit_id,call,verdict)) is True if request_approval else False
             except asyncio.CancelledError:
                 self.audit.update_metadata(audit_id, latency={**verdict.latency.model_dump(), "approval_ms":round((perf_counter()-approval_started)*1000,2), "end_to_end_ms":round((perf_counter()-started)*1000,2)})
                 self.audit.record_approval(audit_id, "cancelled")
@@ -202,15 +216,16 @@ class Firewall:
                 raise ValueError("Payment provider returned no identifier")
             self.audit.update_metadata(audit_id, execution_result=result)
             self.audit.update(audit_id,status="succeeded",paypal_id=identifier,paypal_status=result.get("status"),reserved_day=datetime.now(timezone.utc).date().isoformat())
-            await send(type="tool_result",id=audit_id+":result",decision="ALLOW",status="succeeded",message=f"Provider accepted {call.tool}: {result.get('status','CREATED')}",paypal_id=identifier,paypal_status=result.get("status"),**outcome,**details)
-            return {**result,"decision":"ALLOW",**outcome}
         except asyncio.CancelledError:
             self.audit.update(audit_id,status="unknown",reason="Execution interrupted; verify PayPal before retrying")
             raise
         except Exception:
             self.audit.update(audit_id,status="unknown",reason="PayPal call failed or outcome unknown; verify sandbox before retrying")
-            await send(type="tool_result",id=audit_id+":error",decision="ALLOW",status="unknown",message="PayPal call failed or outcome unknown. Verify sandbox before retrying.",**details)
+            await send(type="tool_result",id=audit_id+":error",decision="ALLOW",status="unknown",message="PayPal call failed or outcome unknown. Verify sandbox before retrying.",**outcome,**details)
             return {"decision":"ALLOW","status":"unknown","error":"PayPal call failed or outcome unknown",**outcome}
+        else:
+            await send(type="tool_result",id=audit_id+":result",decision="ALLOW",status="succeeded",message=f"Provider accepted {call.tool}: {result.get('status','CREATED')}",paypal_id=identifier,paypal_status=result.get("status"),**outcome,**details)
+            return {**result,"decision":"ALLOW",**outcome}
         finally:
             latency = self.audit.event(audit_id)["latency"]
             self.audit.update_metadata(audit_id, latency={**latency, "execution_ms":round((perf_counter()-execution_started)*1000,2), "end_to_end_ms":round((perf_counter()-started)*1000,2)})
