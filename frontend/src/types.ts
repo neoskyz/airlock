@@ -4,6 +4,7 @@ export interface Config {
   demo_mode: boolean;
   agent_mode: AgentMode;
   live_available: boolean;
+  llm_degraded: boolean;
   judge_mode?: string;
   paypal_mode: string;
   agent_model: string;
@@ -52,6 +53,8 @@ export interface Run {
   events: TimelineEvent[];
   approvals: Approval[];
   error?: string;
+  judge_mode?: string;
+  llm_degraded?: boolean;
 }
 export interface AuditRow {
   id: string;

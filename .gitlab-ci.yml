@@ -1,0 +1,24 @@
+stages:
+  - test
+  - build
+
+backend-tests:
+  stage: test
+  image: python:3.13
+  variables:
+    ANTHROPIC_API_KEY: ''
+    PAYPAL_CLIENT_ID: ''
+    PAYPAL_CLIENT_SECRET: ''
+    DEMO_MODE: 'true'
+  before_script:
+    - python -m pip install uv
+  script:
+    - uv sync --frozen
+    - uv run --no-sync pytest
+
+frontend-build:
+  stage: build
+  image: node:22
+  script:
+    - npm ci --prefix frontend
+    - npm run build --prefix frontend

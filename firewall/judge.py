@@ -1,4 +1,4 @@
-"""Independent intent adjudication. Runtime judge failures never downgrade to rules."""
+"""Independent intent adjudication. Runtime judge failures block; exhausted daily budgets use explicit rules."""
 import json
 import re
 from .models import Decision, ToolCall, Verdict
@@ -34,12 +34,16 @@ class RuleJudge:
 class AnthropicJudge:
     mode = "anthropic"
 
-    def __init__(self, client, model=JUDGE_MODEL):
+    def __init__(self, client, model=JUDGE_MODEL, *, budget=None, fallback=None):
+        self.budget = budget
+        self.fallback = fallback or RuleJudge()
         self.client = client
         self.model = model
         self.trusted_contacts = {}
 
     async def judge(self, call: ToolCall, provenance: Provenance) -> Verdict:
+        if self.budget is not None and not self.budget.reserve():
+            return await self.fallback.judge(call, provenance)
         try:
             response = await self.client.messages.create(
                 model=self.model, max_tokens=700,
@@ -60,10 +64,10 @@ class AnthropicJudge:
             return Verdict(decision=Decision.BLOCK, reason="Intent judge unavailable or malformed response — fail-closed")
 
 
-def build_judge(api_key: str | None, client=None, *, model=JUDGE_MODEL):
+def build_judge(api_key: str | None, client=None, *, model=JUDGE_MODEL, budget=None, fallback=None):
     if not api_key:
         return RuleJudge()
     if client is None:
         from anthropic import AsyncAnthropic
         client = AsyncAnthropic(api_key=api_key, timeout=30, max_retries=0)
-    return AnthropicJudge(client, model=model)
+    return AnthropicJudge(client, model=model, budget=budget, fallback=fallback)

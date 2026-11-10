@@ -42,6 +42,8 @@ Only the Toolkit's bottom-level order function is imported; Airlock does not imp
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.13, Node.js 22+, npm, and Make. Then, from the repository root:
 
 ```sh
+git clone https://gitlab.com/neozx/airlock
+cd airlock
 make dev
 ```
 
@@ -60,7 +62,7 @@ The startup script loads `.env` only when it exists. Never commit that file. An 
 
 | Variable | Default / behavior |
 | --- | --- |
-| `ANTHROPIC_API_KEY` | Empty: simulated compromised agent and rule judge. With a key: real LLM judge in both agent modes; live agent can use Claude. |
+| `ANTHROPIC_API_KEY` | Empty: simulated compromised agent and rule judge. With a key and daily budget: real LLM judge in both agent modes; live agent can use Claude. |
 | `AGENT_MODE` | `compromised`; choose `live` for real Claude tool use. The UI can select the mode for each run. |
 | `AGENT_MODEL` | `claude-sonnet-5-5`; override with a model available to your account. |
 | `JUDGE_MODEL` | `claude-haiku-5-5`; override independently of the agent model. |
@@ -69,6 +71,9 @@ The startup script loads `.env` only when it exists. Never commit that file. An 
 | `PAYPAL_CLIENT_SECRET` | Empty: MOCK PayPal. Never logged or stored in the audit trail. |
 | `PAYPAL_SHOP_EMAIL` | `shop@chargers.example`; replace with a real sandbox recipient for recording. |
 | `PAYPAL_CONTRACTOR_EMAIL` | `contractor@contractor.example`; replace with a real sandbox contractor recipient. |
+| `RUN_RATE_LIMIT_PER_MINUTE` | `5`; maximum new runs per client IP in a rolling minute (positive integer). |
+| `RUN_RATE_LIMIT_PER_HOUR` | `30`; maximum new runs per client IP in a rolling hour (positive integer). |
+| `DAILY_LLM_CALL_LIMIT` | `500`; shared agent/judge call budget per UTC day. `0` immediately selects the scripted agent and rule judge. |
 | `SQLITE_PATH` | `data/audit.sqlite3` |
 | `POLICY_PATH` | `policies/default.yaml` |
 
@@ -76,7 +81,7 @@ Only PayPal sandbox endpoints are used. Set both PayPal credentials and use a sa
 
 Model availability and account access must be checked with your Anthropic account. An unavailable live agent model is reported as a run error; judge errors, timeouts, and malformed output **BLOCK** the call. API failures do not silently turn into successful mock payments.
 
-The default **Simulated compromised agent** replays an agent that has already accepted the poisoned checkout policy, reliably attempting the $29 order and $500 payout. **Live Claude agent** lets the configured model choose its tools and may resist the injection. Without an Anthropic key, a live request explicitly falls back to the labelled simulation. With a key, both modes use the real LLM judge whenever the firewall is enabled. For stable recording, select the simulated mode and keep the Anthropic key set. The UI labels agent simulation, judge mode, and MOCK/SANDBOX payments separately.
+The default **Simulated compromised agent** replays an agent that has already accepted the poisoned checkout policy, reliably attempting the $29 order and $500 payout. **Live Claude agent** lets the configured model choose its tools and may resist the injection. Without an Anthropic key, a live request explicitly falls back to the labelled simulation. With a key and daily LLM budget remaining, both modes use the real LLM judge whenever the firewall is enabled. For stable recording, select the simulated mode and keep the Anthropic key set. The UI labels agent simulation, judge mode, and MOCK/SANDBOX payments separately.
 
 ## Threat model
 
@@ -101,7 +106,7 @@ uv run pytest
 make build
 ```
 
-Tests use mocked clients and HTTP transports, never real PayPal or Anthropic requests. CI runs the same backend tests and frontend production build. See [docs/todo.md](docs/todo.md) for outstanding sandbox verification, hosting, and video work.
+Tests use mocked clients and HTTP transports, never real PayPal or Anthropic requests. GitLab CI (`.gitlab-ci.yml`) installs locked Python dependencies with uv, runs pytest, and builds the frontend with Node.js 22 and `npm ci`. See [docs/todo.md](docs/todo.md) for outstanding sandbox verification, hosting, and video work.
 
 The existing Python 3.13 environment and installed frontend dependencies support offline tests and builds. Dependency locks are already present; this change does not regenerate them. Clean installation, real API access, browser interaction, and deployment remain separate from those checks. See [validation notes](docs/validation.md) for the exact verified scope.
 
@@ -109,7 +114,9 @@ The existing Python 3.13 environment and installed frontend dependencies support
 
 After committing and pushing your reviewed code, create a Render Blueprint from `render.yaml`. Its build command builds the frontend and then installs the backend with uv; FastAPI serves both on `$PORT`. The default service is a free instance with deterministic agent mode enabled. Configure secrets in Render and replace the sandbox recipient emails before enabling real calls.
 
-The free instance's SQLite storage is ephemeral and resets on redeploy or instance replacement. For retained audit history, attach a persistent disk on a supported paid plan and point `SQLITE_PATH` to that mount. Do not add multiple workers: live run and approval state belongs to one process. This demo has no login and includes an intentionally unsafe firewall-off mode; publish it with MOCK credentials for untrusted visitors, and use a controlled sandbox session for recording.
+Public runs are limited to 5 per minute and 30 per hour per client IP by default. Render requests use the first IP in `X-Forwarded-For`; the UI displays the server's friendly 429 message when a limit is reached. Agent and judge share a 500-call daily LLM budget, counting attempted API calls. Once exhausted, new runs use the labelled scripted agent and remaining payment reviews use the rule judge until the next UTC day. If a live agent needs another model call after the budget is exhausted, its current run stops with an explicit budget message; it is not replayed as a scripted run, avoiding duplicate payment attempts. These guards are held in memory and reset when the single server process restarts.
+
+The free instance's SQLite storage is ephemeral and resets on redeploy or instance replacement. For retained audit history, attach a persistent disk on a supported paid plan and point `SQLITE_PATH` to that mount. Do not add multiple workers: live run and approval state belongs to one process. This demo has no login and includes an intentionally unsafe firewall-off mode. Rate limits and the daily LLM budget bound model use; sandbox calls remain possible, so configure sandbox credentials and recipients deliberately before publishing.
 
 ## AI tools and attribution
 

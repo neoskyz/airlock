@@ -15,13 +15,15 @@ class Run:
     events: list = field(default_factory=list)
     approvals: list = field(default_factory=list)
     error: str | None = None
+    judge_mode: str = "rules"
+    llm_degraded: bool = False
 
     def __post_init__(self):
         self.messages.append({"role":"user","content":self.message})
         self.provenance = Provenance(self.message)
 
     def snapshot(self):
-        return {key:getattr(self,key) for key in ("id","status","firewall_enabled","agent_mode","messages","events","approvals","error")}
+        return {key:getattr(self,key) for key in ("id","status","firewall_enabled","agent_mode","messages","events","approvals","error","judge_mode","llm_degraded")}
 
     async def emit(self, event):
         self.events.append({"id":uuid4().hex, **event})

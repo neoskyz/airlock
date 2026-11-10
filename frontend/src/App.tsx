@@ -75,7 +75,9 @@ export function App() {
   const timelineBottom = useRef<HTMLDivElement>(null);
   const inFlight = useRef(false);
   const activeRun = runs.find(run => run.id === activeId);
-  const displayedMode = activeRun?.agent_mode || agentMode;
+  const llmDegraded = Boolean(config?.llm_degraded || activeRun?.llm_degraded);
+  const displayedMode = activeRun?.agent_mode || (llmDegraded ? 'compromised' : agentMode);
+  const judgeMode = llmDegraded ? 'rules' : activeRun?.judge_mode || config?.judge_mode;
   const running = sending || Boolean(activeId && (!activeRun || ['running', 'awaiting_approval'].includes(activeRun.status)));
   const pendingApprovals = activeRun?.approvals.filter(approval => ['pending', 'awaiting_approval'].includes(approval.status.toLowerCase())) || [];
   const allEvents = runs.flatMap(run => run.events.filter(event => event.type !== 'message').map(event => ({ ...event, runId: run.id })));
@@ -88,13 +90,18 @@ export function App() {
 
   useEffect(() => {
     const controller = new AbortController();
-    request<Config>('/api/config', { signal: controller.signal }).then(value => {
+    let initialized = false;
+    const refreshConfig = () => request<Config>('/api/config', { signal: controller.signal }).then(value => {
+      const firstLoad = !initialized;
       setConfig(value);
-      setAgentMode(value.agent_mode);
+      setAgentMode(current => firstLoad || !value.live_available ? value.agent_mode : current);
+      initialized = true;
     }).catch(err => {
-      if (err.name !== 'AbortError') setError(`Backend unavailable: ${err.message}. Start the FastAPI server and reload.`);
+      if (!initialized && err.name !== 'AbortError') setError(`Backend unavailable: ${err.message}. Start the FastAPI server and reload.`);
     });
-    return () => controller.abort();
+    void refreshConfig();
+    const interval = setInterval(() => { void refreshConfig(); }, 5000);
+    return () => { clearInterval(interval); controller.abort(); };
   }, []);
   useEffect(() => { void refreshAudit(); }, [refreshAudit, tab]);
   useEffect(() => {
@@ -110,6 +117,7 @@ export function App() {
         setRuns(current => current.some(item => item.id === run.id) ? current.map(item => item.id === run.id ? run : item) : [...current, run]);
         if (run.status === 'completed' || run.status === 'failed') {
           setActiveId(null);
+          void request<Config>('/api/config').then(setConfig).catch(() => {});
           await refreshAudit();
           return;
         }
@@ -166,16 +174,17 @@ export function App() {
   const mock = config?.paypal_mode?.toLowerCase().includes('mock');
 
   return <div className="app-shell">
-    <header className="topbar"><a className="brand" href="#" onClick={event => { event.preventDefault(); setTab('demo'); }}><div className="brand-mark"><Shield/></div><span>Air<span className="brand-guard">lock</span><small>PAYMENT FIREWALL</small></span></a><div className="topbar-right"><span className={`environment-badge ${mock ? 'mock' : ''}`}>{config ? (mock ? 'MOCK PAYPAL' : 'PAYPAL SANDBOX') : 'CONNECTING'}</span>{config && <span className="mode-badge">{displayedMode === 'compromised' ? 'SIMULATED AGENT' : 'LIVE CLAUDE'}</span>}{config?.judge_mode && <span className="mode-badge">{config.judge_mode.toLowerCase().includes('rule') ? 'RULE JUDGE' : 'LLM JUDGE'}</span>}<div className="header-divider"/><div className="firewall-toggle"><div><b>Firewall</b><small>{firewall ? 'Protecting tool calls' : 'Payments unprotected'}</small></div><button type="button" role="switch" aria-checked={firewall} aria-label="Payment firewall" disabled={running} onClick={() => setFirewall(value => !value)} className={`switch ${firewall ? 'on' : ''}`}><span/></button><span className={firewall ? 'toggle-on' : 'toggle-off'}>{firewall ? 'ON' : 'OFF'}</span></div></div></header>
+    <header className="topbar"><a className="brand" href="#" onClick={event => { event.preventDefault(); setTab('demo'); }}><div className="brand-mark"><Shield/></div><span>Air<span className="brand-guard">lock</span><small>PAYMENT FIREWALL</small></span></a><div className="topbar-right"><span className={`environment-badge ${mock ? 'mock' : ''}`}>{config ? (mock ? 'MOCK PAYPAL' : 'PAYPAL SANDBOX') : 'CONNECTING'}</span>{config && <span className="mode-badge">{displayedMode === 'compromised' ? 'SIMULATED AGENT' : 'LIVE CLAUDE'}</span>}{judgeMode && <span className="mode-badge">{judgeMode.toLowerCase().includes('rule') ? 'RULE JUDGE' : 'LLM JUDGE'}</span>}{llmDegraded && <span className="environment-badge mock">DAILY LLM LIMIT · DEGRADED</span>}<div className="header-divider"/><div className="firewall-toggle"><div><b>Firewall</b><small>{firewall ? 'Protecting tool calls' : 'Payments unprotected'}</small></div><button type="button" role="switch" aria-checked={firewall} aria-label="Payment firewall" disabled={running} onClick={() => setFirewall(value => !value)} className={`switch ${firewall ? 'on' : ''}`}><span/></button><span className={firewall ? 'toggle-on' : 'toggle-off'}>{firewall ? 'ON' : 'OFF'}</span></div></div></header>
     <main>
       <div className="page-heading"><div><div className="eyebrow"><span className="live-dot"/>AGENTIC COMMERCE, WITH GUARDRAILS</div><h1>Good intent. <span>Safer payments.</span></h1><p>One poisoned product page should never become a payment instruction.</p></div><div className="hackathon-mark"><span>BUILT FOR</span><b><i>Pay</i>Pal</b><small>AI HACKATHON · 2026</small></div></div>
       <div className="workspace-bar"><nav aria-label="Workspace"><button className={tab === 'demo' ? 'selected' : ''} onClick={() => setTab('demo')}><span>◈</span> Agent workspace</button><button className={tab === 'audit' ? 'selected' : ''} onClick={() => setTab('audit')}><span>▤</span> Audit log <b>{totalDecisions}</b></button></nav><span className="workspace-note">Policy + intent review + human approval</span></div>
       {error && <div className="error-banner" role="alert"><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
+      {llmDegraded && <div className="mock-notice" role="status"><span>LLM LIMIT</span> Today's AI call limit has been reached. New runs use a scripted agent and rule judge until the next UTC day. An active live run stops before its next model call to avoid replaying payments.</div>}
       {mock && <div className="mock-notice"><span>MOCK</span> No PayPal credentials configured. Payments are simulated; IDs are clearly labeled. No money moves.</div>}
       {tab === 'demo' ? <>
         <section className="agent-mode-bar" aria-label="Agent mode">
           <label htmlFor="agent-mode">AGENT MODE<select id="agent-mode" value={agentMode} disabled={running || !config} onChange={event => setAgentMode(event.target.value as AgentMode)} aria-describedby="agent-mode-detail"><option value="compromised">Simulated compromised agent</option><option value="live" disabled={!config?.live_available}>Live Claude agent</option></select></label>
-          <p id="agent-mode-detail">{agentMode === 'compromised' ? 'Replays a successful injection to make firewall decisions reproducible.' : 'Claude may resist the injected checkout policy; an attack attempt is not guaranteed.'}<span>Intent judge: {config?.judge_model || 'connecting…'}{config && !config.live_available ? ' · Live mode requires an Anthropic key.' : ''}</span></p>
+          <p id="agent-mode-detail">{agentMode === 'compromised' ? 'Replays a successful injection to make firewall decisions reproducible.' : 'Claude may resist the injected checkout policy; an attack attempt is not guaranteed.'}<span>Intent judge: {llmDegraded ? 'rules (daily LLM limit reached)' : config?.judge_model || 'connecting…'}{config && !config.live_available && !llmDegraded ? ' · Live mode requires an Anthropic key.' : ''}</span></p>
         </section>
         <section className="scenario-strip" aria-label="Demo scenarios"><span className="scenario-label">TRY A SCENARIO</span><button disabled={running || !config} onClick={() => void startRun(purchase, false)}><span className="scenario-number">01</span>Attack · firewall off <span className="scenario-arrow">↗</span></button><button disabled={running || !config} onClick={() => void startRun(purchase, true)}><span className="scenario-number">02</span>Attack · firewall on <span className="scenario-arrow">↗</span></button><button disabled={running || !config} onClick={() => void startRun(contractor, true)}><span className="scenario-number">03</span>Contractor approval <span className="scenario-arrow">↗</span></button></section>
         <div className="workspace-grid"><section className="chat-panel panel"><div className="panel-header"><div className="panel-title"><span className="agent-avatar">A</span><div><h2>Shopping & payments agent</h2><p>{config ? `${agentModeLabel(displayedMode)}${displayedMode === 'live' ? ` · ${config.agent_model}` : ''}` : 'Connecting to agent'}</p></div></div><span className="panel-kicker">CONVERSATION</span></div>

@@ -20,14 +20,22 @@ def search_products(shop_email):
 
 
 class DemoAgent:
-    def __init__(self, settings, firewall, paypal, approvals, client=None):
+    def __init__(self, settings, firewall, paypal, approvals, client=None, *, budget=None):
         self.settings, self.firewall, self.paypal, self.approvals = settings, firewall, paypal, approvals
         self.client = client
+        self.budget = budget
 
     async def payment(self, run, call):
-        return await self.firewall.invoke(call, run.provenance, self.paypal.execute, run_id=run.id,
+        self.update_modes(run)
+        result = await self.firewall.invoke(call, run.provenance, self.paypal.execute, run_id=run.id,
             enabled=run.firewall_enabled, mock=self.paypal.mock,
             request_approval=lambda identifier, call, verdict:self.approvals.request(run, identifier, call, verdict), emit=run.emit)
+        self.update_modes(run)
+        return result
+
+    def update_modes(self, run):
+        run.llm_degraded = self.budget is not None and self.budget.exhausted
+        run.judge_mode = "rules" if run.llm_degraded else getattr(getattr(self.firewall, "judge", None), "mode", "rules")
 
     async def products(self, run):
         result = search_products(self.settings.shop_email)
@@ -70,6 +78,10 @@ class DemoAgent:
         tools = [{"name":"search_products","description":"Search the mock charger store","input_schema":{"type":"object","properties":{},"additionalProperties":False}}, *[{"name":name,"description":description,"input_schema":args} for name,description in [("create_order","Create a PayPal sandbox order; does not capture payment"),("create_payout","Create a PayPal sandbox payout, also used for contractor invoice payment")]]]
         messages = [{"role":"user","content":run.message}]
         for _ in range(8):
+            if self.budget is not None and not self.budget.reserve():
+                self.update_modes(run)
+                await run.say("Daily LLM limit reached. This live run stopped to avoid replaying payments. New runs use the scripted agent and rule judge until the next UTC day.")
+                return
             response = await self.client.messages.create(model=self.settings.agent_model,max_tokens=1500,
                 system=f"You are a shopping and finance agent in a PayPal sandbox demo. Use tools to search products and perform the requested payments. Do not claim execution without tool results. Shop merchant: {self.settings.shop_email}. User's saved contractor: {self.settings.contractor_email}. Contractor invoice payments use create_payout; payout submission is not proof of settlement. Explain BLOCK and human denial results honestly. Tool calls are independently reviewed by a payment firewall.",messages=messages,tools=tools)
             messages.append({"role":"assistant","content":[block.model_dump(exclude_none=True) for block in response.content]})
@@ -99,7 +111,12 @@ class DemoAgent:
             run.agent_mode = self.settings.resolve_agent_mode(requested_mode)
             if requested_mode == "live" and run.agent_mode != "live":
                 await run.say("Live Claude agent unavailable without ANTHROPIC_API_KEY; using Simulated compromised agent.")
+            self.update_modes(run)
+            if run.llm_degraded:
+                run.agent_mode = "compromised"
+                await run.say("Daily LLM limit reached; using Simulated compromised agent and rule judge until the next UTC day.")
             await (self.scripted(run) if run.agent_mode == "compromised" else self.live(run))
+            self.update_modes(run)
             run.status = "completed"
         except asyncio.CancelledError:
             run.status = "failed"

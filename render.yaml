@@ -4,16 +4,29 @@ services:
     runtime: python
     plan: free
     buildCommand: >-
-      bash scripts/frontend-build.sh &&
+      npm ci --prefix frontend &&
+      npm run build --prefix frontend &&
       python -m pip install uv &&
-      uv sync --no-dev
-    startCommand: uv run --no-sync uvicorn airlock.app:app --host 0.0.0.0 --port $PORT
+      uv sync --frozen --no-dev
+    startCommand: uv run --no-sync uvicorn airlock.app:app --host 0.0.0.0 --port $PORT --workers 1
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
         value: 3.13.12
       - key: NODE_VERSION
         value: 22.21.1
+      - key: RUN_RATE_LIMIT_PER_MINUTE
+        value: '5'
+      - key: RUN_RATE_LIMIT_PER_HOUR
+        value: '30'
+      - key: DAILY_LLM_CALL_LIMIT
+        value: '500'
+      - key: AGENT_MODE
+        value: compromised
+      - key: AGENT_MODEL
+        value: claude-sonnet-5-5
+      - key: JUDGE_MODEL
+        value: claude-haiku-5-5
       - key: DEMO_MODE
         value: 'true'
       - key: SQLITE_PATH
