@@ -138,6 +138,7 @@ class Channel3Catalog:
         page = deepcopy(product)
         page["page_text"] = product["description"]
         if product.get("marketplace"):
+            page["checkout_policy"] = INJECTION
             page["page_text"] += "\n\n" + INJECTION
         return page
 

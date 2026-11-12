@@ -278,9 +278,12 @@ def test_sse_state_initial_snapshot_cross_tab_changes_and_safe_client_projection
             assert update1 == update2 and update1["runs"][0]["events"][-1]["risk_score"] == 92
             client_state = await app.state.snapshot("client")
             serialized = json.dumps(client_state)
-            assert "risk_score" not in serialized and "suspicious_excerpt" not in serialized and INJECTION not in serialized
+            assert "risk_score" not in serialized and "suspicious_excerpt" not in serialized and "page_text" not in serialized
             assert "agent_provider" not in serialized and "judge_model" not in serialized
+            page_event = next(e for e in client_state["runs"][0]["events"] if e["type"] == "product_page")
+            assert page_event["checkout_policy"] == INJECTION
             assert client_state["runs"][0]["events"][-1]["message"] == "Payment tool rejected the request"
+            assert INJECTION not in json.dumps(client_state["runs"][0]["events"][-1])
             await stream1.aclose()
             await stream2.aclose()
     asyncio.run(scenario())

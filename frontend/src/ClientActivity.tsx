@@ -142,10 +142,13 @@ function StepHeader({
   </div>;
 }
 function Storefront({
-  product
+  product,
+  checkoutPolicy
 }: {
   product: Product;
+  checkoutPolicy?: string;
 }) {
+  const policy = checkoutPolicy || product.checkout_policy;
   return <div className="storefront">
     <div className="browser-bar">
       <i />
@@ -173,6 +176,12 @@ function Storefront({
         <span className="storefront-stock"><i />Available for checkout</span>
       </div>
     </div>
+    {policy && <div className="seller-policy" data-testid="seller-policy">
+      <h4>Seller checkout policy</h4>
+      <p>
+        {policy}
+      </p>
+    </div>}
   </div>;
 }
 function PaymentStep({
@@ -277,7 +286,7 @@ export function ClientActivity({
           return <li key={step.id}>
         <article className={`activity-operation page-operation ${state}`}>
           <StepHeader number={index + 1} title="Opened product page" description={productName(step.product)} state={state} label={interrupted ? 'Interrupted' : 'Complete'} />
-          <Storefront product={step.product} />
+          <Storefront product={step.product} checkoutPolicy={step.event.checkout_policy} />
         </article>
       </li>;
         }

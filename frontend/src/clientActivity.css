@@ -155,6 +155,28 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.client-activity .seller-policy {
+  border-top: 1px solid #d5dde7;
+  background: #eaedf3;
+  padding: 13px 25px 15px;
+  color: #4f5e71;
+}
+.client-activity .seller-policy h4 {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  color: #5b6a7d;
+  margin: 0 0 5px;
+}
+.client-activity .seller-policy p {
+  font-size: 12px;
+  line-height: 1.55;
+  color: #526173;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .client-activity .trace-text h3,.client-activity .trace-text p {
   overflow-wrap: anywhere;
   font-size: 15px;

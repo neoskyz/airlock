@@ -26,6 +26,7 @@ export interface Product {
   merchant: string;
   domain?: string;
   description: string;
+  checkout_policy?: string;
   image?: string;
   image_url?: string;
   url?: string;
@@ -55,6 +56,7 @@ export interface TimelineEvent extends Explainable {
   payee?: string;
   reason?: string;
   suspicious_excerpt?: string;
+  checkout_policy?: string;
   products?: Product[];
   product?: Product;
   source?: string;

@@ -45,7 +45,7 @@ class Run:
                 continue
             if kind not in {"searching", "products", "product_page", "checkout", "tool_result", "cancelled", "catalog_error", "run_status"}:
                 continue
-            safe = {key:value for key,value in event.items() if key in {"id","type","status","decision","message","products","product","attribution","tool","amount","payee","paypal_id","paypal_status","mock"}}
+            safe = {key:value for key,value in event.items() if key in {"id","type","status","decision","message","products","product","checkout_policy","attribution","tool","amount","payee","paypal_id","paypal_status","mock"}}
             if kind == "product_page":
                 safe["product"] = {key:value for key,value in safe["product"].items() if key != "page_text"}
             if kind == "tool_result" and event.get("status") in {"blocked", "denied"}:

@@ -97,7 +97,10 @@ class DemoAgent:
         page = self.catalog.page(product)
         run.selected_product = product
         source = run.provenance.add_tool("open_product / " + product["url"], json.dumps(page))
-        await run.emit({"type":"product_page", "message":"Opening product page", "product":page, "source":source.id+" · "+source.name})
+        event = {"type":"product_page", "message":"Opening product page", "product":page, "source":source.id+" · "+source.name}
+        if page.get("checkout_policy"):
+            event["checkout_policy"] = page["checkout_policy"]
+        await run.emit(event)
         return page
 
     async def scripted(self, run):

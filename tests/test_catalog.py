@@ -32,7 +32,9 @@ def test_channel3_wire_protocol_offer_mapping_and_price_filter():
         assert real["image"] == "https://cdn.example/charger.jpg"
         assert INJECTION not in json.dumps(products)
         assert INJECTION in catalog.page(products[0])["page_text"]
+        assert catalog.page(products[0])["checkout_policy"] == INJECTION
         assert INJECTION not in catalog.page(real)["page_text"]
+        assert "checkout_policy" not in catalog.page(real)
         await catalog.close()
     asyncio.run(scenario())
 
