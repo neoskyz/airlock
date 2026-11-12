@@ -214,7 +214,8 @@ def test_redesigned_routes_shared_mode_policy_audit_and_wallet(tmp_path):
     (tmp_path/"index.html").write_text("<html>Airlock</html>")
     app = create_app(Settings(sqlite_path=str(tmp_path/"redesign.sqlite3"), frontend_dist=str(tmp_path)), paypal=MockPayPal(), judge=RuleJudge())
     with TestClient(app) as client:
-        assert client.get("/", follow_redirects=False).headers["location"] == "/console"
+        landing = client.get("/", follow_redirects=False)
+        assert landing.status_code == 200 and all(f'href="{path}"' in landing.text for path in ["/client", "/console", "/docs"])
         for path in ["/client","/console","/docs"]:
             response = client.get(path)
             assert response.status_code == 200

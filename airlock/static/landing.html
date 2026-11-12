@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Airlock · Agentic Commerce Firewall</title>
+<style>
+:root{--bg:#0b0f12;--card:#12181e;--line:#263039;--fg:#eef2f6;--dim:#93a1b0;--accent:#8fb4ff}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:radial-gradient(900px 600px at 20% 0%,rgba(110,130,255,.14),transparent 70%),var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;display:flex;flex-direction:column}
+main{max-width:1040px;margin:0 auto;padding:12vh 24px 48px;flex:1}
+.logo{display:flex;align-items:center;gap:14px}
+.logo svg{width:44px;height:44px}
+h1{font-size:48px;margin:0;letter-spacing:-.02em}
+.tag{font-size:22px;color:#c9d4ff;margin:18px 0 10px;font-weight:600}
+p.lead{font-size:18px;line-height:1.6;color:var(--dim);max-width:720px;margin:0 0 40px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px}
+a.card{display:block;padding:26px;border:1px solid var(--line);border-radius:14px;background:var(--card);color:inherit;text-decoration:none;transition:border-color .15s,transform .15s}
+a.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .k{font-size:12px;letter-spacing:.14em;color:var(--accent);font-weight:700}
+.card h2{font-size:22px;margin:10px 0 8px}
+.card p{margin:0;color:var(--dim);line-height:1.55;font-size:15px}
+.card .go{margin-top:18px;color:var(--accent);font-weight:600;font-size:15px}
+.hint{margin-top:28px;color:var(--dim);font-size:15px;line-height:1.6}
+footer{text-align:center;color:#66727f;font-size:13px;padding:24px}
+footer a{color:#8d99a6}
+</style></head><body><main>
+<div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#8fb4ff" stroke-width="1.8" stroke-linejoin="round"><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg><h1>Airlock</h1></div>
+<div class="tag">Agentic Commerce Firewall</div>
+<p class="lead">Airlock sits between AI agents and PayPal. Every payment an agent attempts is checked against policies, risk scoring, and the user's real intent before any money moves. Everything here runs against the PayPal sandbox.</p>
+<div class="grid">
+ <a class="card" href="/client"><div class="k">1 · AGENT</div><h2>Agentic Payment Client</h2><p>An AI shopping agent with a PayPal sandbox wallet. Give it a task and watch it search, pick a product, and pay.</p><div class="go">Open client →</div></a>
+ <a class="card" href="/console"><div class="k">2 · SECURITY</div><h2>Airlock Console</h2><p>Live decisions, flagged events, approvals, policies, and the audit trail. Switch between Monitor and Enforce.</p><div class="go">Open console →</div></a>
+ <a class="card" href="/docs"><div class="k">3 · DEVELOPERS</div><h2>SDK Docs</h2><p>Protect any agent's PayPal tools in three lines of Python, and see how decisions are made.</p><div class="go">Read docs →</div></a>
+</div>
+<p class="hint">Tip: open the client and the console side by side. Try <em>"Buy me the cheapest 65W USB-C charger under $40"</em> in Monitor mode, then again in Enforce mode.</p>
+</main>
+<footer>Deployed on Render · Audit log powered by AG Grid · Product data from Channel3 · <a href="https://gitlab.com/neozx/airlock">Source</a> · MIT License</footer>
+</body></html>

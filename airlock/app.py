@@ -373,7 +373,8 @@ def create_app(settings=None, *, paypal=None, judge=None, catalog=None):
 
     @app.get("/")
     async def root():
-        return RedirectResponse("/console", status_code=307)
+        # Landing page that links to the two apps and the docs.
+        return FileResponse(Path(__file__).parent / "static" / "landing.html", media_type="text/html")
 
     @app.get("/api/store/volt-65w")
     async def volt_listing():
