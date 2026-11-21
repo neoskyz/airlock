@@ -1,6 +1,6 @@
 # Airlock: agentic payment firewall
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE) [![Render](https://img.shields.io/badge/Hosting-Render-6855cf)](https://airlock-2i3r.onrender.com/console)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 Agentic commerce firewall for AI shopping agents, with policy limits, intent review, provenance tracking, and human approval before any PayPal payment runs.
 
@@ -12,7 +12,7 @@ An agent authorized to buy a $19.99 charger can encounter a product page instruc
 
 > **Disclaimer:** Airlock is an independent personal project. It is not affiliated with, endorsed by, or sponsored by PayPal. "PayPal" is used only to describe the sandbox APIs this demo calls.
 
-Open the [payment client](https://airlock-2i3r.onrender.com/client) and [security console](https://airlock-2i3r.onrender.com/console) in separate tabs. The client shows shopping activity and payment results; the console shows risk factors, source evidence, approvals, and an AG Grid audit log. Both update through SSE. [SDK documentation](https://airlock-2i3r.onrender.com/docs) explains the reusable Python boundary.
+After [running it locally](#run-locally), open the payment client (`/client`) and security console (`/console`) in separate tabs. The client shows shopping activity and payment results; the console shows risk factors, source evidence, approvals, and an AG Grid audit log. Both update through SSE. The SDK documentation (`/docs`) explains the reusable Python boundary.
 
 **PayPal sandbox only.** Missing payment credentials select an explicit MOCK adapter with `MOCK` IDs. Creating an order does not capture a payment; an accepted payout may remain pending.
 
@@ -62,14 +62,14 @@ The live shopping agent uses OpenAI Chat Completions/function calling (`gpt-4o-m
 | **AG Grid Community** | Sortable, filterable audit table linked to event details. |
 | **Render** | One FastAPI service hosts React, the API, and SSE; one worker coordinates approvals and budget reservations. |
 
-The poisoned Volt page is a **simulated third-party marketplace listing**, inserted only into charger-related searches. It is separate from Channel3 data. Product links open the selected merchant offer; Volt opens the disclosed [simulated store](https://airlock-2i3r.onrender.com/store/volt-65w).
+The poisoned Volt page is a **simulated third-party marketplace listing**, inserted only into charger-related searches. It is separate from Channel3 data. Product links open the selected merchant offer; Volt opens the disclosed simulated store (`/store/volt-65w`).
 
 ## Run locally
 
 Requires Python 3.13, [uv](https://docs.astral.sh/uv/getting-started/installation/), Node.js 22+, npm, and Make.
 
 ```sh
-git clone https://gitlab.com/neozx/airlock
+git clone https://github.com/neoskyz/airlock
 cd airlock
 make dev
 ```
@@ -119,7 +119,7 @@ protected_paypal = guard.wrap_tool(paypal.execute)
 result = await protected_paypal(call, provenance, mock=paypal.mock)
 ```
 
-Import these classes from `firewall`. An adapter implements `async execute(ToolCall, request_id)`. Pass `request_approval=your_async_callback` to support approvals; without a callback, approval-required calls are denied. See [`/docs`](https://airlock-2i3r.onrender.com/docs) for setup and imports.
+Import these classes from `firewall`. An adapter implements `async execute(ToolCall, request_id)`. Pass `request_approval=your_async_callback` to support approvals; without a callback, approval-required calls are denied. See `/docs` in the running app for setup and imports.
 
 `GET /api/audit`, `GET /api/audit/<id>`, and `GET /api/audit/flagged` expose records; `GET /api/events` streams updates. The client uses `?audience=client` to omit security evidence. Webhooks are not implemented.
 
