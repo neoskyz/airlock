@@ -4,6 +4,12 @@
 
 An agent authorized to buy a $19.99 charger can encounter a product page instructing it to send a separate $500 “verification” payout. Airlock checks **every proposed payment against policy, user intent, and the origin of its instructions before PayPal execution**. Untrusted merchant text cannot grant payment authority.
 
+[![Watch the Airlock demo on YouTube](assets/demo-video.jpg)](https://www.youtube.com/watch?v=SsS_AU7n3Ic)
+
+**[Watch the demo video on YouTube](https://www.youtube.com/watch?v=SsS_AU7n3Ic)**
+
+> **Disclaimer:** Airlock is an independent personal project. It is not affiliated with, endorsed by, or sponsored by PayPal. "PayPal" is used only to describe the sandbox APIs this demo calls.
+
 Open the [payment client](https://airlock-2i3r.onrender.com/client) and [security console](https://airlock-2i3r.onrender.com/console) in separate tabs. The client shows shopping activity and payment results; the console shows risk factors, source evidence, approvals, and an AG Grid audit log. Both update through SSE. [SDK documentation](https://airlock-2i3r.onrender.com/docs) explains the reusable Python boundary.
 
 **PayPal sandbox only.** Missing payment credentials select an explicit MOCK adapter with `MOCK` IDs. Creating an order does not capture a payment; an accepted payout may remain pending.
@@ -44,7 +50,7 @@ The console allowlist supports named recipients with validated email or domain a
 
 The live shopping agent uses OpenAI Chat Completions/function calling (`gpt-4o-mini` by default); an Anthropic agent is also supported. The intent judge runs independently. Without the selected agent key, a labelled scripted simulation runs; without a judge key, rules provide the review. Live model errors never replay scripted payments.
 
-### PayPal and sponsor technology
+### PayPal and third-party technology
 
 | Technology | Role |
 | --- | --- |
