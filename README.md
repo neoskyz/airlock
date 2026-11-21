@@ -2,6 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE) [![Render](https://img.shields.io/badge/Hosting-Render-6855cf)](https://airlock-2i3r.onrender.com/console)
 
+Agentic commerce firewall for AI shopping agents, with policy limits, intent review, provenance tracking, and human approval before any PayPal payment runs.
+
 An agent authorized to buy a $19.99 charger can encounter a product page instructing it to send a separate $500 “verification” payout. Airlock checks **every proposed payment against policy, user intent, and the origin of its instructions before PayPal execution**. Untrusted merchant text cannot grant payment authority.
 
 [![Watch the Airlock demo on YouTube](assets/demo-video.jpg)](https://www.youtube.com/watch?v=SsS_AU7n3Ic)
